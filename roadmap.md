@@ -33,13 +33,15 @@ new
 
 - [x]  **UNITY - WorldStructure loading standardization**
     - [x]  generalize structures (city can generate house structures) → gets caught by StructureObjectLoaderSimple (structure has either prefab OR just label?)
-- [ ]  **Standardize config loading**
-    - [ ]  UNITY - add loading from MSG (json) or from file (path given thru a msg on some topic). The config loading should be additive and refresh when new configs are sent? - thus also we might want to generalize the WorldLoadingModule to have some function OnWorldConfigChanged, which is by default called in Awake, but also triggered by the Controller if a json with new config param values is received? (Controller might get a config AND a world reset request. Usually, e.g. during RL training, it will just receive a new seed as the only config, this should however also probably propagate to the loading modules).
-    - [ ]  UNITY - make the new worldgen loading controller be as controllable as the old WildfireWorldManager (through the generation request topic AND the new form of sending the config through a Json). (separate topic for world and agent config).
-    - [ ]  META - move the current world config file from Unity to the config blender in ratsim, name it e.g. default.json.
-    - [ ]  META - create some basic agent config which will reflect the current agent (named rat1, with a lidar2d sensor, odom sensor), name should say sthg like default_lidar2d
-    - [ ]  Ratsim - implement the config blender - it should allow stacking a given set of presets for both world and agent configuration.
-    - [ ]  COMPLETION = can run the train_ppo.py with the config being created in train_ppo.py using the config blender. An example would be
+- [x]  **Standardize config loading**
+    - [x]  UNITY - add loading from MSG (json) or from file (path given thru a msg on some topic). The config loading should be additive and refresh when new configs are sent? - thus also we might want to generalize the WorldLoadingModule to have some function OnWorldConfigChanged, which is by default called in Awake, but also triggered by the Controller if a json with new config param values is received? (Controller might get a config AND a world reset request. Usually, e.g. during RL training, it will just receive a new seed as the only config, this should however also probably propagate to the loading modules).
+    - [x]  UNITY - make the new worldgen loading controller be as controllable as the old WildfireWorldManager (through the generation request topic AND the new form of sending the config through a Json). (separate topic for world and agent config).
+    - [x]  META - move the current world config file from Unity to the config blender in ratsim, name it e.g. default.json.
+    - [x]  META - create some basic agent config which will reflect the current agent (named rat1, with a lidar2d sensor, odom sensor), name should say sthg like default_lidar2d
+    - [x]  Ratsim - implement the config blender - it should allow stacking a given set of presets for both world and agent configuration.
+    - [x]  UNITY - AgentLoader WorldLoadingModule: spawns agent prefabs from Resources based on agent config, manages sensor enable/disable + param overrides via reflection, finds safe spawn positions. Uses Initialize() lifecycle hook (called before chunk loading) to solve the agent-carries-ChunkLoadingRequestor dependency.
+    - [x]  GYM ENV - env.py accepts agent_config dict, sends it to Unity via /sim_control/agent_config before first reset. train_ppo.py loads agent preset via blend_presets("agents", [...]).
+    - [x]  COMPLETION = can run the train_ppo.py with the config being created in train_ppo.py using the config blender.
 - [ ]  **MSG RESTRUCTURING TO 3D** - transfer from 2D Twist messages into general Pose messages (will save us a lot of pain when developing both for 2D and 3D navigation scenarios)
     - [ ]  UNITY - remove the Twist2D, replace with Pose msg and CORRECTLY handle the difference between Unity’s coordinate system (z=forward, x=right, y=up) and the one used in robotics (x=forward, y=left, z=up)
     - [ ]  UNITY - change all usage of the Twist2D to Pose (e.g. in odom sensor, but also all others).

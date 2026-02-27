@@ -26,6 +26,24 @@ Unity sim (TCP:9000)
 - **Message types** must stay in sync between Unity (`MessageDefs.cs` + `MessageRegistry.cs`) and Python (`message_definitions.py`). Python messages are auto-generated from C# via `generate_python_msgs.py` in `ratsim/`.
 - **Config** (world + agent JSON) is authored via the config blender in `ratsim/config_blender/`, sent over TCP, and parsed by Unity's `WorldLoadingController`.
 
+## Config Flow
+
+Both world and agent configs use the same JSON entries format: `{"entries": [{"key": "k", "value": "v"}, ...]}`.
+
+**World config** is sent each reset:
+1. `train_ppo.py`: `blend_presets("world", ["default"])` → override dict → pass to env
+2. `env.py` `reset()`: `to_entries_json(cfg)` → publish to `/sim_control/world_config` → publish reset
+
+**Agent config** is sent once during env construction:
+1. `train_ppo.py`: `blend_presets("agents", ["sphereagent_2d_lidar"])` → pass to env
+2. `env.py` `__init__()`: `to_entries_json(agent_config)` → publish to `/sim_control/agent_config`
+3. Unity: `WorldLoadingController` stores it; `AgentLoader.Initialize()` reads it each episode
+
+**Episode lifecycle in Unity:**
+`StartEpisode()` → `ClearAllWorldData()` (modules `Clear()` in reverse order) → `InitializeAllModules()` (modules `Initialize()` in registration order, AgentLoader spawns agent here) → `ChunkLoadingRequestor.Tick()` (agent's requestor triggers chunk loading)
+
+**Agent preset keys:** `prefab_name`, `name_prefix`, `sensors` (comma-separated), `actuators`, plus sensor param overrides like `lidar2d/maxRange`.
+
 ## Cross-Repo Change Patterns
 
 **Adding a new message type:**
