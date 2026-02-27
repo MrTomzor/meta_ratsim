@@ -62,6 +62,16 @@ Both world and agent configs use the same JSON entries format: `{"entries": [{"k
 2. ratsim: add/update preset JSON in `config_blender/world_presets/`
 3. Gym env: expose in `worldgen_config` dict in `curricula.py`
 
+## Coordinate Convention
+
+All Python/ROS code uses ROS standard: **x=forward, y=left, z=up**. Unity uses x=right, y=up, z=forward internally, but all sensors/actuators convert via `CoordConversion.cs` so that data crossing the TCP boundary is always in ROS frame.
+
+**Message types for pose and motion:**
+- `PoseMessage` (x, y, z, qx, qy, qz, qw) — position + orientation quaternion. Used by sensors (AbsolutePose2DSensor, RelativePoseSensor, Odom2DSensor), teleport actuator, and goal position publishing.
+- `TwistMessage` (linear_x/y/z, angular_x/y/z) — velocity/acceleration commands. Used by Twist2DActuator for `/cmd_vel` and `/cmd_accel` topics.
+
+Python quaternion/euler utilities live in `ratsim/transforms.py` (`quat_from_yaw`, `yaw_from_quat`, `quat_to_rpy`, `rpy_to_quat`).
+
 ## Running the Stack
 
 1. Open Unity project and enter Play mode (or run a build) — listens on TCP:9000

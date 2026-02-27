@@ -42,11 +42,11 @@ new
     - [x]  UNITY - AgentLoader WorldLoadingModule: spawns agent prefabs from Resources based on agent config, manages sensor enable/disable + param overrides via reflection, finds safe spawn positions. Uses Initialize() lifecycle hook (called before chunk loading) to solve the agent-carries-ChunkLoadingRequestor dependency.
     - [x]  GYM ENV - env.py accepts agent_config dict, sends it to Unity via /sim_control/agent_config before first reset. train_ppo.py loads agent preset via blend_presets("agents", [...]).
     - [x]  COMPLETION = can run the train_ppo.py with the config being created in train_ppo.py using the config blender.
-- [ ]  **MSG RESTRUCTURING TO 3D** - transfer from 2D Twist messages into general Pose messages (will save us a lot of pain when developing both for 2D and 3D navigation scenarios)
-    - [ ]  UNITY - remove the Twist2D, replace with Pose msg and CORRECTLY handle the difference between Unity’s coordinate system (z=forward, x=right, y=up) and the one used in robotics (x=forward, y=left, z=up)
-    - [ ]  UNITY - change all usage of the Twist2D to Pose (e.g. in odom sensor, but also all others).
-    - [ ]  RATSIM (human input to run script requied?) - regenerate the msgs
-    - [ ]  Ratsim ROS2 - correctly map any ratsim Pose msgs to ROS2 pose msgs
-    - [ ]  RL - since we are just dealing with RL in 2D, just map to 2D in the same way that we used the 2D msg
-    - [ ]  COMPLETION = can run the train_ppo.py script
+- [x]  **MSG RESTRUCTURING TO 3D** - replaced Twist2DMessage with PoseMessage (x,y,z,qx,qy,qz,qw) and TwistMessage (linear_x/y/z, angular_x/y/z). All code uses ROS standard coordinates (x=forward, y=left, z=up). Unity sensors/actuators handle conversion internally via CoordConversion utility.
+    - [x]  UNITY - replaced Twist2D with PoseMessage + TwistMessage, added CoordConversion.cs for Unity↔ROS coordinate conversion
+    - [x]  UNITY - updated all sensors (AbsolutePose2DSensor, RelativePoseSensor, Odom2DSensor) and actuators (Twist2DActuator, PoseTeleportActuator, HumanControlManager, WildfireWorldManager)
+    - [x]  RATSIM - updated message_definitions.py, added transforms.py (quat/euler utilities), removed nav_DEPRECATED/
+    - [x]  Ratsim ROS2 - updated conversions.py (now near-trivial 1:1 field mapping) and sim_abstract_agent.py
+    - [x]  RL - updated env.py and forager_env_1.py to use PoseMessage/TwistMessage with yaw_from_quat
+    - [x]  COMPLETION = can run the train_ppo.py script
 - [ ]  **ROS2 package restructuring/generalization — should allow multiple agents!**
