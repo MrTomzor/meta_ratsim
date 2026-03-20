@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working across the ratsim project.
 
+## Project Overview
+This project (name WIP) is a playground / simulator for researching large-scale long-horizon behavior, inspired primarily by the foraging capabilities of many types of animals (from bats traveling tens of kilometers to fruit trees, to dogs being trained to search for people in search-and-rescue missions over hour long missions and often requiring manipulation of the environment). Its primary goal is to pose foraging tasks/scenarios that can be attacked from multiple angles - robotics (ROS2 connection) and reinforcement learning (Gym env) and to find middle-ground solutions. The simulator offers large-scale, procedurally generated and loaded environments of many different types, while supporting as modular extensions as possible (new sensing, actuation, env generation, prefabs or textures etc).
+
 ## Meta-Repo Structure
 
 This is a meta-repo containing symlinks to four independent git repositories that together form the ratsim simulation framework. Each repo has its own CLAUDE.md with detailed architecture docs.
@@ -37,10 +40,10 @@ Both world and agent configs use the same JSON entries format: `{"entries": [{"k
 **Agent config** is sent once during env construction:
 1. `train_ppo.py`: `blend_presets("agents", ["sphereagent_2d_lidar"])` → pass to env
 2. `env.py` `__init__()`: `to_entries_json(agent_config)` → publish to `/sim_control/agent_config`
-3. Unity: `WorldLoadingController` stores it; `AgentLoader.Initialize()` reads it each episode
+3. Unity: `WorldLoadingController` stores it; `AgentLoader.Generate()` reads it each episode
 
 **Episode lifecycle in Unity:**
-`StartEpisode()` → `ClearAllWorldData()` (modules `Clear()` in reverse order) → `InitializeAllModules()` (modules `Initialize()` in registration order, AgentLoader spawns agent here) → `ChunkLoadingRequestor.Tick()` (agent's requestor triggers chunk loading)
+`StartEpisode()` → `ClearAllWorldData()` (providers `Clear()` in reverse dependency order) → `InitializeAllModules()` (providers `Generate()` in dependency order via topological sort, AgentLoader spawns agent here) → `ChunkLoadingRequestor.Tick()` (agent's requestor triggers chunk loading)
 
 **Agent preset keys:** `prefab_name`, `name_prefix`, `sensors` (comma-separated), `actuators`, plus sensor param overrides like `lidar2d/maxRange`.
 
@@ -58,7 +61,7 @@ Both world and agent configs use the same JSON entries format: `{"entries": [{"k
 4. ROS2: map to appropriate ROS2 message type
 
 **Changing world generation config:**
-1. Unity: add param handling in the relevant `WorldLoadingModule`
+1. Unity: add param handling in the relevant `WorldDataProvider`
 2. ratsim: add/update preset JSON in `config_blender/world_presets/`
 3. Gym env: expose in `worldgen_config` dict in `curricula.py`
 
