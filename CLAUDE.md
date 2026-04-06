@@ -5,24 +5,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working across 
 ## Project Overview
 This project (name WIP) is a playground / simulator for researching large-scale long-horizon behavior, inspired primarily by the foraging capabilities of many types of animals (from bats traveling tens of kilometers to fruit trees, to dogs being trained to search for people in search-and-rescue missions over hour long missions and often requiring manipulation of the environment). Its primary goal is to pose foraging tasks/scenarios that can be attacked from multiple angles - robotics (ROS2 connection) and reinforcement learning (Gym env) and to find middle-ground solutions. The simulator offers large-scale, procedurally generated and loaded environments of many different types, while supporting as modular extensions as possible (new sensing, actuation, env generation, prefabs or textures etc).
 
+## Sub-Repo CLAUDE.md Files
+
+Before modifying code in any sub-repository, you MUST read that repo's CLAUDE.md file first:
+- `ratsim/CLAUDE.md`
+- `ratsim_unity_project/CLAUDE.md`
+- `ratsim_wildfire_gym_env/CLAUDE.md`
+- `ratsim_ros2/CLAUDE.md`
+- `ratsim_experiments/CLAUDE.md`
+
 ## Meta-Repo Structure
 
-This is a meta-repo containing symlinks to four independent git repositories that together form the ratsim simulation framework. Each repo has its own CLAUDE.md with detailed architecture docs.
+This is a meta-repo containing symlinks to five independent git repositories that together form the ratsim simulation framework. Each repo has its own CLAUDE.md with detailed architecture docs.
 
 | Directory | Repo | Role |
 |-----------|------|------|
-| `ratsim/` | Python SDK | TCP connector, message definitions, config blender, visualization |
+| `ratsim/` | Python SDK | TCP connector, message definitions, config blender, human control, visualization |
 | `ratsim_unity_project/` | Unity project | Simulator: worldgen, sensors, actuators, TCP server |
 | `ratsim_wildfire_gym_env/` | Gym environment | Gymnasium RL env wrapping the Unity sim via ratsim SDK |
 | `ratsim_ros2/` | ROS 2 package | ROS 2 bridge to the Unity sim via ratsim SDK |
+| `ratsim_experiments/` | Experiment automation | Train/test scripts, run definitions, method-invariant result recording |
 
 ## How the Repos Connect
 
 ```
 Unity sim (TCP:9000)
-    ├── ratsim (Python SDK) ← message defs, connector, config
-    │       ├── ratsim_wildfire_gym_env (Gym env) ← RL training
-    │       └── ratsim_ros2 (ROS 2 bridge) ← robotics integration
+    ├── ratsim (Python SDK) ← message defs, connector, config, human control
+    │       ├── ratsim_wildfire_gym_env (Gym env) ← RL env wrapper
+    │       ├── ratsim_ros2 (ROS 2 bridge) ← robotics integration
+    │       └── ratsim_experiments ← train/test automation, imports gym env + SDK
 ```
 
 - **ratsim** is the shared dependency. The Gym env and ROS2 package both import `ratsim.roslike_unity_connector`.
@@ -45,7 +56,7 @@ Both world and agent configs use the same JSON entries format: `{"entries": [{"k
 **Episode lifecycle in Unity:**
 `StartEpisode()` → `ClearAllWorldData()` (providers `Clear()` in reverse dependency order) → `InitializeAllModules()` (providers `Generate()` in dependency order via topological sort, AgentLoader spawns agent here) → `ChunkLoadingRequestor.Tick()` (agent's requestor triggers chunk loading)
 
-**Agent preset keys:** `prefab_name`, `name_prefix`, `sensors` (comma-separated), `actuators`, plus sensor param overrides like `lidar2d/maxRange`.
+**Agent preset keys:** `prefab_name`, `name_prefix`, `sensors` (comma-separated), `actuators`, plus sensor/actuator param overrides like `lidar2d/maxRange` or `velocity/maxLinearVelocity`.
 
 ## Cross-Repo Change Patterns
 
@@ -55,10 +66,11 @@ Both world and agent configs use the same JSON entries format: `{"entries": [{"k
 3. Gym/ROS2: use the new message type in env or bridge code
 
 **Adding a new sensor:**
-1. Unity: create sensor MonoBehaviour in `Assets/Sensors/`, publish on a topic
-2. ratsim: ensure message type exists in Python
-3. Gym env: subscribe to the topic in `env.py`, add to observation space
-4. ROS2: map to appropriate ROS2 message type
+1. Unity: create sensor MonoBehaviour in `Assets/Sensors/`, publish on a topic. Store latest data in public fields for UI visualization.
+2. Unity: register in `AgentLoader.SensorNameToType`
+3. ratsim: ensure message type exists in Python
+4. Gym env: subscribe to the topic in `env.py`, add to observation space
+5. ROS2: map to appropriate ROS2 message type
 
 **Changing world generation config:**
 1. Unity: add param handling in the relevant `WorldDataProvider`
@@ -78,8 +90,9 @@ Python quaternion/euler utilities live in `ratsim/transforms.py` (`quat_from_yaw
 ## Running the Stack
 
 1. Open Unity project and enter Play mode (or run a build) — listens on TCP:9000
-2. From the Gym env: `python train_ppo.py` or `python test_manual_control.py`
-3. From ROS2: launch via `ros2 launch ratsim_ros2 <launch_file>`
+2. From experiments repo: `python train.py def=<rundef> method=ppo` or `python test.py def=<rundef> model=<path>`
+3. Human control testing: `python -m ratsim.human_control_test --world_preset default --rtf 1.0`
+4. From ROS2: launch via `ros2 launch ratsim_ros2 <launch_file>`
 
 ## Planning
 
