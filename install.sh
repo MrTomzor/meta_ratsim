@@ -97,7 +97,13 @@ for repo in "${REPOS[@]}"; do
   link="$META_DIR/$repo"
   target="$GIT_DIR/$repo"
   if [[ -L "$link" ]]; then
-    echo "[install] Symlink $repo already exists, skipping."
+    current="$(readlink "$link")"
+    if [[ "$current" == "$target" ]]; then
+      echo "[install] Symlink $repo already correct, skipping."
+    else
+      echo "[install] Repointing symlink $repo: $current -> $target"
+      ln -sfn "$target" "$link"
+    fi
   elif [[ -e "$link" ]]; then
     echo "[install] WARN: $link exists and is not a symlink, leaving alone."
   else
