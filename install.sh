@@ -149,7 +149,8 @@ pip install \
   tensorboard
 pip install -e "$GIT_DIR/ratsim"
 pip install --no-deps -e "$GIT_DIR/ratsim_wildfire_gym_env"
-pip install --no-deps -e "$GIT_DIR/ratsim_experiments"
+# ratsim_experiments is a scripts dir (train.py / test.py), not a package —
+# run scripts from that directory, no pip install needed.
 deactivate
 
 # ----- Dreamer venv --------------------------------------------------------
@@ -178,7 +179,6 @@ fi
 pip install --no-deps -e "$GIT_DIR/dreamerv3"
 pip install --no-deps -e "$GIT_DIR/ratsim"
 pip install --no-deps -e "$GIT_DIR/ratsim_wildfire_gym_env"
-pip install --no-deps -e "$GIT_DIR/ratsim_experiments"
 deactivate
 
 # ----- Final notes ----------------------------------------------------------
