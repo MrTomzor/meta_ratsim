@@ -94,6 +94,56 @@ Python quaternion/euler utilities live in `ratsim/transforms.py` (`quat_from_yaw
 3. Human control testing: `python -m ratsim.human_control_test --world_preset default --rtf 1.0`
 4. From ROS2: launch via `ros2 launch ratsim_ros2 <launch_file>`
 
+## Running on a Headless / Cloud Box
+
+### Bootstrap
+
+`install.sh` at the meta-repo root clones sibling repos into `~/git/`, symlinks them into `meta_ratsim/`, creates two venvs (`~/ratvenv/venv` for SB3, `~/ratvenv/dreamer_venv` for DreamerV3), installs requirements for both, and editable-installs the ratsim packages. Auto-detects GPU via `nvidia-smi` unless `--gpu` / `--cpu` is forced. Idempotent; `--force` recreates venvs. Requires `python3-venv` and `python3-pip` apt packages — the script preflights this.
+
+Note: `ratsim_experiments` is intentionally **not** pip-installed. It's a scripts directory (train.py, test.py); `cd` into it and run scripts directly. (Its `pyproject.toml` currently trips setuptools flat-layout discovery — worth fixing with an explicit packages list if we ever want to install it.)
+
+### Headless display for the Unity binary
+
+Unity needs an X server even in compute-only scenes (for now). `ratsim/scripts/setup_headless_display.sh` (run once, with sudo) sets up a virtual X server on `:99`:
+- **NVIDIA path**: binds Xorg to the GPU's PCI bus; renders on the GPU.
+- **Fallback path**: `xserver-xorg-video-dummy` + Mesa llvmpipe (CPU rendering).
+
+The Xorg config is cached at `/etc/X11/xorg-ratsim.conf` — **re-run the setup script after driver changes**, otherwise it'll keep using the path it took on first run (e.g. llvmpipe from before the NVIDIA driver was installed). Verify with `DISPLAY=:99 glxinfo | grep renderer`.
+
+`start_ratsim_headless.sh <binary>` attaches the Unity binary to `DISPLAY=:99` and waits for TCP:9000.
+
+**Possible future improvement**: if no cameras are ever used in the build, adding `-batchmode -nographics` to the launcher lets Unity skip rendering entirely and drops the X-server dependency — worth trying for perf on compute-only runs.
+
+### GPU vs CPU per method
+
+(UNVERIFIED, POSSIBLY INCORRECT): For single-env RL (`n_envs=1`) the bottleneck is Unity stepping + Python overhead, not policy compute. CPU↔GPU transfer cost per step can dominate matmul savings for small policies. Measured on this project:
+
+| Method | Best device | Why |
+|---|---|---|
+| PPO (small MLP, `n_envs=1`) | **CPU** | GPU transfer per step > forward-pass savings. Laptop CPU beats cloud GPU on same model. Pass `device="cpu"` to the SB3 `PPO(...)` constructor. |
+| DreamerV3 | **GPU** | World model + actor-critic are large enough to amortize transfer. ~1.7x on `fps/train`, ~1.6x on `fps/policy`. Override via `method.jax.platform=cuda` (default in `train_dreamerv3.py:173` is `cpu`). |
+
+`fps/policy` in Dreamer logs is the env step rate — capped by Unity single-env stepping regardless of GPU. `fps/train` is world-model update throughput.
+
+### CUDA / driver compatibility
+
+Version-matching here is fiddly and has bitten us repeatedly:
+
+- **NVIDIA driver version → max supported CUDA**: driver 550 → CUDA 12.4, driver 545 → 12.3, driver 525 → 12.0. `nvidia-smi` shows both.
+- **Torch** must match the driver. Default PyPI torch currently targets CUDA 12.6/12.8 (needs driver ≥560). For driver 550 use `pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision`; for older drivers use `cu118`.
+- **JAX** `0.4.33` with `jax[cuda12]` bundles CUDA 12.3, so it needs driver ≥545. Works on 550 as-is.
+- Error decode: torch's "found version NNNNN" = major·1000 + minor·10 + patch, so `12040` = CUDA 12.4.
+
+### Viewing TensorBoard over SSH
+
+`ratsim_experiments/tensorboard.sh` binds to `localhost:6006`. Forward via SSH rather than opening firewall ports:
+
+```bash
+ssh -N -f -L 6006:localhost:6006 user@<server>
+# on server, inside ratsim_experiments: ./tensorboard.sh
+# on laptop: http://localhost:6006
+```
+
 ## Planning
 
 See `roadmap.md` for current project goals, milestones, and TODOs.
