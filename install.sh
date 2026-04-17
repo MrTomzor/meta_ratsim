@@ -114,6 +114,11 @@ create_venv() {
     echo "[install] --force: removing $path"
     rm -rf "$path"
   fi
+  # Treat a dir with no bin/activate as a broken partial venv and recreate.
+  if [[ -d "$path" ]] && [[ ! -f "$path/bin/activate" ]]; then
+    echo "[install] Found partial venv at $path (no bin/activate); recreating."
+    rm -rf "$path"
+  fi
   if [[ ! -d "$path" ]]; then
     echo "[install] Creating venv $path"
     python3 -m venv "$path"
