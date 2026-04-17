@@ -50,6 +50,18 @@ done
 [[ "$WITH_UNITY" == 1 ]] && REPOS+=("ratsim_unity_project")
 [[ "$WITH_ROS2" == 1 ]] && REPOS+=("ratsim_ros2")
 
+# ----- Preflight: python3-venv must be functional ---------------------------
+if ! python3 -c "import venv, ensurepip" 2>/dev/null; then
+  PYVER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  cat >&2 <<EOF
+[install] ERROR: python3 venv/ensurepip module is missing.
+On Debian/Ubuntu, install it with:
+    sudo apt update && sudo apt install -y python3-venv python3.${PYVER#*.}-venv python3-pip
+(You may only need one of the two venv packages depending on your distro.)
+EOF
+  exit 1
+fi
+
 # ----- GPU detection --------------------------------------------------------
 if [[ "$GPU_MODE" == "auto" ]]; then
   if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
@@ -107,6 +119,11 @@ create_venv() {
     python3 -m venv "$path"
   else
     echo "[install] Venv $path already exists, skipping create."
+  fi
+  if [[ ! -f "$path/bin/activate" ]]; then
+    echo "[install] ERROR: venv at $path is missing bin/activate." >&2
+    echo "[install] python3 -m venv did not complete. Check python3-venv is installed." >&2
+    exit 1
   fi
 }
 create_venv "$MAIN_VENV"
