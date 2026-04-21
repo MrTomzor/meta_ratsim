@@ -110,7 +110,18 @@ Unity needs an X server even in compute-only scenes (for now). `ratsim/scripts/s
 
 The Xorg config is cached at `/etc/X11/xorg-ratsim.conf` — **re-run the setup script after driver changes**, otherwise it'll keep using the path it took on first run (e.g. llvmpipe from before the NVIDIA driver was installed). Verify with `DISPLAY=:99 glxinfo | grep renderer`.
 
-`start_ratsim_headless.sh <binary>` attaches the Unity binary to `DISPLAY=:99` and waits for TCP:9000.
+`start_ratsim_headless.sh <binary>` attaches the Unity binary to `DISPLAY=:99` and waits for TCP:9000. `stop_ratsim_headless.sh <binary>` kills the Unity process.
+
+Xorg is installed as a systemd unit (`xorg-ratsim.service`, `enable --now`) so it persists across reboots without re-running setup. Only re-run setup if the NVIDIA driver changes.
+
+Idle Xorg is cheap (~20-50 MB RAM, near-zero CPU). To stop/disable anyway:
+```bash
+sudo systemctl stop xorg-ratsim
+sudo systemctl disable xorg-ratsim       # don't auto-start on boot
+sudo systemctl start xorg-ratsim         # re-enable when needed
+```
+
+A desktop viewer (VNC/xrdp/GDM) on the same box coexists with `:99` — each uses its own display number. Check `ls /tmp/.X11-unix/` to see all active X sockets.
 
 **Possible future improvement**: if no cameras are ever used in the build, adding `-batchmode -nographics` to the launcher lets Unity skip rendering entirely and drops the X-server dependency — worth trying for perf on compute-only runs.
 
@@ -147,3 +158,4 @@ ssh -N -f -L 6006:localhost:6006 user@<server>
 ## Planning
 
 See `roadmap.md` for current project goals, milestones, and TODOs.
+
