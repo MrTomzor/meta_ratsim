@@ -7,6 +7,13 @@ Handoff doc for running ratsim training on the **RCI cluster** (`login[1-4].rci.
 a SLURM-scheduled HPC cluster at CTU. Written after reading the cluster's
 `how_to_start` wiki page and auditing our stack against it.
 
+**Where things stand (2026-08-06 end of day):** Phases 0–2 complete. Install, headless Unity,
+single training, concurrent trainings and the scheduler all run on the cluster. **Two decisions are
+waiting on the user, both flagged 🔲:** pin `n_envs` across machines before generating paper curves
+(§0.8), and pick how to scale dreamer past one GPU (before phase 3). **Untested gaps:** `n_envs>1`
+in a job, 4-way concurrent packing (only 2 verified), any laptop dreamer baseline, and whether
+`OMP_NUM_THREADS=4` suits dreamer at all.
+
 **Epistemic status:** every claim about *our code* below was verified by reading the
 source (file:line given). **§1 was verified empirically on the laptop (2026-08-06), and
 it overturned this doc's original conclusion.** **Phases 0, 1 and 2 are now COMPLETE — the probe has
@@ -393,16 +400,77 @@ dreamerv3's graph evidently pins bfloat16 somewhere a `float16` compute_dtype th
 `machines/rci.yaml` originally carried that override and would have broken **every** dreamer run
 on the cluster. It now sets only `jax.platform: cuda`.
 
-Reading the two rates (per the meta-repo CLAUDE.md): **`fps/policy` is the env step rate** and
-**`fps/train` is world-model update throughput**. `fps/policy` 67 against PPO's 442 is expected
-rather than alarming — dreamer runs `train_ratio: 32`, so it does far more compute per env step.
-It also means **dreamer is ~6.6× slower in wall-clock per env step than PPO here**, which matters
-for planning: budget partitions by env steps needed, and remember `needs.gpu: 1` caps dreamer at
-one concurrent run regardless of spare cores.
+#### What `train_ratio` actually means, and why the two rates aren't independent
+
+`train_ratio` is **replayed timesteps per environment step**. From
+`dreamerv3/embodied/run/train.py`:
+
+```python
+batch_steps  = batch_size * batch_length          # 8 * 48 = 384
+should_train = Ratio(train_ratio / batch_steps)   # 32/384 = 1/12
+```
+
+So with our settings (`train_dreamerv3.py:207` sets `run.train_ratio: 32.0`) a gradient step fires
+**every 12 env steps**, each replaying 384 timesteps. `train_fps.step(batch_steps)` counts
+*replayed* timesteps, so the two logged rates are locked together:
+
+> **`fps/train` ≈ `train_ratio` × `fps/policy`** — measured 67.3 × 32 ≈ 2154 against a logged
+> 2039.8. They are one number reported two ways, not two independent measurements.
+
+**Planning numbers that follow.** `fps/policy` 67 against PPO's 442 is expected rather than
+alarming — dreamer does ~32× the compute per env step. But in wall-clock it means:
+
+| | |
+|---|---|
+| dreamer vs PPO, per env step | **~6.6× slower** |
+| 1M dreamer steps | **~4.1 h** |
+
+**So `gpufast` (4 h) cannot finish a single 1M-step dreamer run.** Use `gpu` (1 day), `gpulong`
+(3 days) or `gpuextralong` (21 days), and remember `needs.gpu: 1` caps dreamer at one concurrent
+run regardless of spare cores — see the scaling options in phase 3.
 
 **Not measured:** any laptop dreamer baseline for comparison, and whether `OMP_NUM_THREADS=4`
 (inherited from the PPO finding) is right for dreamer — its compute is JAX-on-GPU, so the
 tiny-matmul thread argument that produced that number may not apply at all.
+
+### 0.8 ⚠️ Cross-machine comparability — read this before putting curves in a paper
+
+**Nothing in the cluster port changes what the agent learns, with one exception, and the exception
+is easy to miss.**
+
+Safe (throughput only, no effect on learning):
+- **xvfb vs `DISPLAY=:99`** — only the render path. Lidar is `Physics.Raycast`
+  (`SemanticLidarSensor.cs`) and was verified structurally identical under both (§1).
+- **`OMP_NUM_THREADS`** — reorders float reductions; no systematic bias.
+- **Ports, pidfiles, rundirs** — inert.
+- **`method.device: cpu` vs `cuda`, and compute dtype** — can shift low-order bits, but no
+  systematic direction.
+
+**NOT safe: `n_envs` differs between machine configs.**
+
+| config | ppo | dreamer |
+|---|---|---|
+| `default.yaml` | **4** | 4 |
+| `gpu_example.yaml` | 8 | 1 |
+| `rci.yaml` (new) | **1** | 1 |
+
+For SB3 PPO the rollout buffer is `n_steps × n_envs`, so `n_envs` changes how much data each
+update sees and therefore the number of updates for a fixed `total_steps`, and the gradient noise.
+**A laptop curve at `n_envs=4` is not comparable to a cluster curve at `n_envs=1`.**
+
+This is by design, and the design is in tension with what you want. `scheduler/config.py` puts
+`n_envs` in the machine config deliberately — *"a 'what does this box have capacity for' question,
+not 'what's the experiment about' question"*. That is right for throughput and wrong for
+cross-machine curves.
+
+> **🔲 OPEN DECISION (needs the user).** Pin `n_envs` to one value across every machine config used
+> for paper runs. Which value depends on what the existing published/plotted curves used — if
+> those came from `default.yaml` on the laptop, that is **4**, and `rci.yaml` should be changed to
+> match. Nothing measured so far is affected: every timing run in this doc used `train.py`'s own
+> default of `n_envs=1` and wrote only to throwaway dirs.
+
+Secondary, same family: `step_multiplier`, `total_steps`, `n_stages` and `metaseed` all come from
+the experiment def rather than the machine config, so those are already machine-independent.
 
 ---
 
@@ -957,6 +1025,41 @@ which is not worth it.
 Also fixed here: the scheduler ignores `--use-port-9000` under SLURM, and `allocate_unity_instances`
 never reuses :9000 there. On a shared node an open :9000 is far more likely to be a stranger's
 process than your Editor, and attaching would silently train against someone else's simulator.
+
+### 🔲 OPEN DECISION — scaling dreamer beyond one GPU (user to choose)
+
+Today `dreamer` declares `needs.gpu: 1` against `resources.gpu: 1`, so **exactly one dreamer run
+at a time**, no matter how many cores are free. At ~4.1 h per 1M steps (§0.7) that is the binding
+constraint on any dreamer experiment. Three ways up, not mutually exclusive:
+
+**Option 1 — N GPUs, one job, one scheduler.** Request `--gres=gpu:4`, set `resources.gpu: 4` in
+`machines/rci.yaml`, and the existing `ResourceManager` will dispatch 4 dreamers.
+- *Needs a code change first.* The scheduler assigns a **port window** per run and nothing else,
+  so all four children would initialise on GPU 0 and contend or OOM. It needs a `GpuAllocator`
+  mirroring `PortAllocator`, exporting `CUDA_VISIBLE_DEVICES=<idx>` into each dispatched child's
+  environment. Same shape and size as the port change already made, and method-agnostic (works for
+  torch as well as JAX). `scheduler.py` already builds the child env and passes `base_port`, so
+  this is one more field on the same path.
+- Also budget `--mem` for ~4 × `max_ram_gb: 30` because of dreamer's leak.
+- ✅ Keeps resume markers, RAM kills, port windows and a single `scheduler_status` view.
+- ❌ Capped by one node's GPU count; a 4-GPU ask queues longer than a 1-GPU ask.
+
+**Option 2 — one job per run** (`train_job.sbatch` × N, or a SLURM job array).
+- ✅ **Zero code change**, and the only option that spreads across *nodes*, so it is the only way
+  past one node's GPU count.
+- ❌ Loses the scheduler's resume/`.done` bookkeeping and RAM kills; each run queues independently;
+  no single status view (`state.json` is per-scheduler).
+- This is the job-array-vs-scheduler question already raised as phase 3 #12 — deciding one decides
+  the other.
+
+**Option 3 — one run across several GPUs** (`method.jax.train_devices=[0,1,…]`, supported by
+dreamerv3).
+- ✅ Makes a *single* run faster rather than running more of them.
+- ❌ **Changes effective batch semantics, so it is the wrong tool for paper curves** — see §0.8.
+  Fine for a one-off "can we finish this faster" run, not for anything plotted against other runs.
+
+**Recommendation:** Option 1 for a multi-GPU node, falling back to Option 2 only when you want more
+GPUs than one node has. Option 3 only outside the paper's comparison set.
 
 ### Phase 3 — Comfort + scale (~1–2 days, partly optional)
 
