@@ -303,15 +303,23 @@ Raw sim stepping, no learning (`python -m ratsim.fps_test --world maze_default -
 | 16 | 1877 |
 | laptop (16 threads) | **2970** |
 
-> ⚠️ **These training numbers were measured with OpenMP oversubscribed** (see the thread trap
-> below) and are therefore a *floor*, not a clean laptop-vs-cluster comparison. The raw
-> `fps_test` figures are unaffected — Unity does its own threading. A single training run has not
-> been re-measured with correct thread limits.
+> ⚠️ **The cluster training numbers in this table were measured with OpenMP oversubscribed** (see
+> the thread trap below) and are a *floor*, not a fair comparison. **Corrected figure: a single
+> cluster run with 4 threads reaches fps 442**, against **814** on the laptop — so the laptop is
+> ~1.8× faster per run, not ~3×. Raw `fps_test` figures are unaffected; Unity threads itself.
+>
+> The laptop's 814 also depends on this session's xvfb switch: the same run on the old
+> `DISPLAY=:99` rendering path gives **355** (opt_seconds 0.72 vs 0.52), i.e. **xvfb is worth
+> ~2.3× on training**, not just on raw stepping. Both sides of the comparison use xvfb.
 
 Two things to take from this:
 
 - **Never let a job default to 1 CPU.** `sbatch --wrap` without `--cpus-per-task` gives you one,
   and that alone costs **3×** on raw stepping (386 vs 1203). `train_job.sbatch` asks for 4.
+- **Concurrent runs do not interfere.** One run alone gets **442** fps; each of two concurrent
+  runs gets **434–452**. So the `cpu_slot: 16` / `needs.cpu_slot: 4` packing in `machines/rci.yaml`
+  should scale to ~4×440 ≈ 1760 aggregate, roughly **2× the laptop's total** — the actual reason to
+  use the cluster. (Verified at 2 concurrent; 4 is extrapolation.)
 - **Raw stepping scales with CPUs but training barely does.** 4→16 CPUs is +56% on `fps_test` and
   only +20% on training throughput, so above ~4–8 cores the bottleneck is the single-threaded
   Python side (env wrapper, obs assembly, PPO forward), not Unity. Asking for 16 mostly buys
@@ -331,9 +339,22 @@ Measured on two concurrent PPO runs in one 16-core allocation:
 
 | | `opt_seconds` per iteration | `rollout_fps` | overall `fps` |
 |---|---|---|---|
-| default threads (~32 per process, 2 processes) | **188** | ~300 | **20** |
-| `OMP_NUM_THREADS=4` | **1.46** | ~355 | **434–452** |
-| laptop, single run | ~0.5 | ~1000 | 816 |
+| 2 concurrent runs, default threads (~32 each) | **188** | ~300 | **20** |
+| 2 concurrent runs, `OMP_NUM_THREADS=4` | **1.46** | ~355 | **434–452** |
+| **1 run, `OMP_NUM_THREADS=16`** | **53.0** | ~531 | **39** |
+| **1 run, `OMP_NUM_THREADS=4`** | **0.98** | ~562 | **442** |
+| laptop, 1 run | ~0.5 | ~1000 | 814 |
+
+**The last two rows are the important ones, and they are the same node and the same run — only
+the thread count differs. 4 threads beats 16 by 11× on throughput and 54× on the optimize
+phase.** So this is not merely "don't oversubscribe the cgroup": *more threads is worse, full
+stop*, because PPO's optimize phase is many tiny matmuls where thread synchronisation dominates
+the arithmetic. `rci_env.sh` therefore defaults to **4**, not `$SLURM_CPUS_PER_TASK` — an earlier
+version of this fix scaled with the allocation and would have left a 16-core single-run job at
+fps 39. Raise it only for a method measured to benefit.
+
+Note `rollout_fps` was ~531–562 in *both* thread settings: Unity does its own threading and is
+indifferent, so this only ever shows up in the optimize phase.
 
 **~130× on `opt_seconds`, ~22× on throughput.** Note how it hides: `rollout_fps` stays *perfectly
 healthy* because Unity does its own threading, and only the optimize phase collapses — so the

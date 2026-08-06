@@ -63,14 +63,30 @@ esac
 # stayed a healthy ~300. The rollout looks fine and only the optimize phase
 # collapses, which makes this easy to misread as "the cluster CPU is slow".
 #
-# Set to the allocation by default. A job running SEVERAL trainings at once must
-# lower it to its per-run share (see scheduler_job.sbatch) or the same
-# oversubscription returns, just divided differently.
+# The default is 4, NOT the allocation size -- do not "fix" this to
+# $SLURM_CPUS_PER_TASK. More threads is actively harmful for this workload,
+# because PPO's optimize phase is many tiny matmuls where thread
+# synchronisation dominates the arithmetic. Measured on one node, same 20k-step
+# PPO run, only OMP_NUM_THREADS differing:
+#
+#   threads=16 -> fps  39, opt_seconds 53.0
+#   threads=4  -> fps 442, opt_seconds  0.98
+#
+# 11x throughput and 54x on the optimize phase, in the *small* direction. Note
+# rollout_fps was ~530-560 in BOTH cases: Unity does its own threading and does
+# not care, so this only ever shows up in the optimize phase.
+#
+# Raise it deliberately for a method that actually benefits (a large conv net,
+# or dreamer's world model on CPU) -- and measure, don't assume. Capped by the
+# allocation so a 2-core job doesn't ask for 4.
 if [ -n "${SLURM_CPUS_PER_TASK:-}" ]; then
-  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$SLURM_CPUS_PER_TASK}"
+  _rat_threads=4
+  [ "$SLURM_CPUS_PER_TASK" -lt "$_rat_threads" ] && _rat_threads="$SLURM_CPUS_PER_TASK"
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$_rat_threads}"
   export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$OMP_NUM_THREADS}"
   export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$OMP_NUM_THREADS}"
   export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-$OMP_NUM_THREADS}"
+  unset _rat_threads
 fi
 
 # --- paths ------------------------------------------------------------------
