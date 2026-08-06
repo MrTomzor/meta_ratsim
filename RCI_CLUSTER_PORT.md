@@ -61,7 +61,9 @@ Observed on a `gpufast` compute node via `rci_port_probes/check_cluster_node.sh`
 **V100 is sm_70 (Volta)** — no native bf16 tensor-core path, and importantly **new CUDA wheels
 have started dropping this arch entirely** (see the CUDA section: cu128 ships CC ≥9.0 only).
 This is the single most consequential hardware fact here. `torch.cuda.is_bf16_supported()`
-nonetheless reports `True`, so measure rather than trust it before using bf16 in DreamerV3.
+nonetheless reports `True`. **Measured outcome for DreamerV3: keep bfloat16.** Lacking bf16
+*tensor cores* does not stop XLA emulating the dtype correctly, and forcing `float16` actually
+**breaks** dreamer (§0.7). Do not infer "avoid bf16" from sm_70.
 If RCI's advertised H200 nodes are reachable, most of this reverses — another reason to record
 hardware per partition.
 
@@ -164,8 +166,8 @@ python -c "import torch; print(torch.cuda.get_arch_list()); \
 ```
 
 Note `torch.cuda.is_bf16_supported()` returns **True** on this V100 even though sm_70 has no
-native bf16 tensor-core path — so treat it as "will run", not "will run fast", and measure
-before relying on bf16 for DreamerV3.
+native bf16 tensor-core path — treat it as "will run", not "will run fast". Measured for
+DreamerV3, bf16 is not merely fine but **required**: `float16` fails outright (§0.7).
 
 **Always verify on a real GPU node rather than trusting the version table:**
 
@@ -370,6 +372,38 @@ these two must be kept in sync by hand.
 **Watch out:** these are `gpufast` nodes (`n23`, `n27`, `n28`, all the same Xeon). Nodes are
 heterogeneous — re-measure on `gpu`/`gpulong` before planning long runs there.
 
+### 0.7 DreamerV3 on the V100 — measured (2026-08-06)
+
+`gpufast` node `n21`, `world=maze_default`, 10 000 steps, 4 CPUs, one variable changed:
+
+| `method.jax.compute_dtype` | outcome | `fps/train` | `fps/policy` |
+|---|---|---|---|
+| **`bfloat16`** (dreamerv3 default) | ✅ exit 0 | **2039.8** | **67.3** |
+| `float16` | ❌ **exit 1** after 106 s | — | — |
+
+`float16` dies with:
+
+```
+TypeError: Argument types differ from the types for which this computation was compiled.
+```
+
+**So "Volta has no native bf16, therefore use float16" is wrong, and this doc asserted it for a
+while.** Lacking bf16 *tensor cores* doesn't stop XLA emulating the dtype correctly, and
+dreamerv3's graph evidently pins bfloat16 somewhere a `float16` compute_dtype then contradicts.
+`machines/rci.yaml` originally carried that override and would have broken **every** dreamer run
+on the cluster. It now sets only `jax.platform: cuda`.
+
+Reading the two rates (per the meta-repo CLAUDE.md): **`fps/policy` is the env step rate** and
+**`fps/train` is world-model update throughput**. `fps/policy` 67 against PPO's 442 is expected
+rather than alarming — dreamer runs `train_ratio: 32`, so it does far more compute per env step.
+It also means **dreamer is ~6.6× slower in wall-clock per env step than PPO here**, which matters
+for planning: budget partitions by env steps needed, and remember `needs.gpu: 1` caps dreamer at
+one concurrent run regardless of spare cores.
+
+**Not measured:** any laptop dreamer baseline for comparison, and whether `OMP_NUM_THREADS=4`
+(inherited from the PPO finding) is right for dreamer — its compute is JAX-on-GPU, so the
+tiny-matmul thread argument that produced that number may not apply at all.
+
 ---
 
 ## 1. The headless-rendering question — MEASURED (Phase 0a done, 2026-08-06)
@@ -525,7 +559,7 @@ false conclusion. Three traps, all worth avoiding:
 | 2 | ~~**Pidfiles / logs in shared `/tmp`**~~ — ✅ **FIXED in phase 2 (§2.5).** Both the script and `unity_launcher.py` derive the dir from `$SLURM_JOB_ID` with identical precedence, and the pidfile is now an atomic reservation rather than a plain write | `unity_launcher.py` `_rundir()`; `start_ratsim_headless.sh` `RUNDIR=` / `claim_pidfile()` | None |
 | 3 | **`install.sh` hardcodes `$HOME` paths** | `install.sh:20` `GIT_DIR="${HOME}/git"`, `:22` `VENV_DIR="${HOME}/ratvenv"` | Medium |
 | 4 | **`install.sh` preflight demands apt** | `install.sh:53-63` errors out telling you to `sudo apt install python3-venv` | Medium (trivial fix) |
-| 5 | ~~**CUDA / driver version matching**~~ — **RESOLVED for `gpufast`, but *not* with default wheels: driver 575 + V100 (sm_70) needs `cu126` explicitly.** Default PyPI torch (`cu130`) wants driver ≥580; `cu128` installs and reports `cuda available: True` but ships CC≥9.0 kernels only and dies at the first matmul. `install.sh` now picks the index from driver **and** compute capability. `jax[cuda12]` is fine as-is. Re-check on other partitions. New sub-risk: V100 lacks bf16 (§0.5) | measured driver 575.51.03; `torch 2.13.0+cu126` arch_list `sm_50..sm_90`, matmul OK | Low |
+| 5 | ~~**CUDA / driver version matching**~~ — **RESOLVED for `gpufast`, but *not* with default wheels: driver 575 + V100 (sm_70) needs `cu126` explicitly.** Default PyPI torch (`cu130`) wants driver ≥580; `cu128` installs and reports `cuda available: True` but ships CC≥9.0 kernels only and dies at the first matmul. `install.sh` now picks the index from driver **and** compute capability. `jax[cuda12]` is fine as-is. Re-check on other partitions. The "V100 lacks bf16" sub-risk turned out not to apply to DreamerV3 (§0.7) | measured driver 575.51.03; `torch 2.13.0+cu126` arch_list `sm_50..sm_90`, matmul OK | Low |
 | 6 | **`setup_headless_display.sh` unusable** | Needs root + systemd; see §1 | Medium (superseded by `xvfb-run`) |
 | 6b | **`start_ratsim_headless.sh` hardwires `DISPLAY=:99`** | `:24` `DISPLAY_NUM=${DISPLAY_NUM:-:99}`, `:58` requires `/tmp/.X11-unix/X99` to pre-exist | Medium — must learn to spawn its own xvfb |
 | 6c | **Nothing loads the `Xvfb` module** | Measured: `Xvfb` is not on `PATH` on RCI without `ml Xvfb` | Medium — every job script needs it |
@@ -777,7 +811,7 @@ non-issue as long as the repo itself lives on `/mnt/personal`, which it does.
    URL from driver version **and** compute capability, landing on `cu126`. `jax[cuda12]` needed
    no change. Verified on a V100 node: `torch 2.13.0+cu126`, arch_list `sm_50..sm_90`, real
    matmul finite, `jax 0.4.33` sees `CudaDevice(id=0)`. Still to do: set DreamerV3 precision to
-   `float16`/`float32` for the V100 (§0.5) — it has no bf16.
+   ~~`float16`/`float32` for the V100~~ — **measured wrong, keep the bfloat16 default (§0.7).**
 5. ✅ **DONE — `start_ratsim_headless.sh` has two display modes.**
    - **`xvfb`** — the script provides the display itself and runs Unity `-batchmode -nographics`.
      Prefers `xvfb-run -a`; if only the `Xvfb` binary exists (the RCI module case) it starts its
@@ -858,9 +892,8 @@ been run in a job at all yet.
    - **`rci_env.sh` must export `PPO_PYTHON_PATH` / `DREAMER_PYTHON_PATH`.** The scheduler resolves
      each method's interpreter through an *env var name* (`config.py DEFAULT_PYTHON_ENV`), not a
      path — that indirection is what lets one scheduler drive both venvs.
-   - **DreamerV3 defaults to `jax.compute_dtype: bfloat16`**, which the V100 (sm_70) has no native
-     path for. `rci.yaml` sets `float16`. `torch.cuda.is_bf16_supported()` reports `True` on this
-     GPU regardless, so don't take that as evidence the default is fine.
+   - **DreamerV3's `jax.compute_dtype: bfloat16` default is correct here** — see §0.7. The
+     `float16` override this config originally carried was measured to break dreamer entirely.
 
    **Also found and fixed a pre-existing scheduler race.** `PortAllocator` releases a window and
    can immediately re-hand those ports to the next stage, while the previous stage's Unity is still
