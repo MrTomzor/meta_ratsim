@@ -8,7 +8,7 @@ live in `../RCI_CLUSTER_PORT.md`; read that first.
 | `check_cluster_node.sh` | Two-tier node probe. Tier 1 (no args) reports capability: login-node detection, xvfb (loading the module if needed) **and whether it actually starts**, per-job scratch, GPU + driver with wheel advice, Python/venv, `ss`, existing listeners on 9000–9999, outbound internet. Tier 2 (pass the build path) launches Unity headless and is the only conclusive answer. |
 | `rci_env.sh` | Sourced by every job script. Initialises Lmod (SLURM jobs do **not** get it by default), loads the Python/Xvfb/git modules, sets `RATSIM_*` paths and a per-job `TMPDIR`, and provides `ratsim_activate` / `ratsim_activate_dreamer`. |
 | `install_job.sbatch` | Installs/updates the stack. Runs on a **CPU node** on purpose — see the glibc note inside. |
-| `train_job.sbatch` | Runs one training. Everything after the script name is passed to `train.py`. Defaults to `cpufast`/no GPU; override with `sbatch -p gpufast --gres=gpu:1 --time=...`. Sets `RATSIM_RUNDIR="$TMPDIR"` and `RATSIM_XVFB=1`, derives an interim `base_port` from `$SLURM_JOB_ID`, and reaps leftover Unity instances on exit. |
+| `train_job.sbatch` | Runs one training. Everything after the script name is passed to `train.py`. Defaults to `cpufast`/no GPU; override with `sbatch -p gpufast --gres=gpu:1 --time=...`. Sets `RATSIM_XVFB=1` and reaps leftover Unity instances on exit; the port window and pidfile dir now come from `$SLURM_JOB_ID` inside `unity_launcher.py`, so this script deliberately sets neither. |
 | `scheduler_job.sbatch` | Runs the **scheduler** for one experiment in a single job (`sbatch scheduler_job.sbatch <exp>`), using `scheduler/machines/rci.yaml`. Sets `OMP_NUM_THREADS=4` to match that file's `needs.cpu_slot` — without it two concurrent runs oversubscribe the cgroup and `opt_seconds` goes from 1.5 to 188. Pick the partition for the whole experiment, not one run. |
 | `gpu_check.sh` | Post-install verification: torch arch list + a **real matmul** (not just `is_available()`), SB3/gym/ratsim imports, JAX devices, dreamerv3 import. |
 | `probe.sh` | Single-variant Unity headless launcher used for the original measurements. Verifies the *listener's* process group so leaked processes can't fake a pass. |
@@ -17,7 +17,7 @@ live in `../RCI_CLUSTER_PORT.md`; read that first.
 ## Usage
 
 ```bash
-scp rci_port_probes/{check_cluster_node.sh,rci_env.sh,gpu_check.sh,install_job.sbatch,train_job.sbatch} rci:~/
+scp rci_port_probes/{check_cluster_node.sh,rci_env.sh,gpu_check.sh,install_job.sbatch,train_job.sbatch,scheduler_job.sbatch} rci:~/
 ssh rci
 sbatch ~/install_job.sbatch                                    # install
 srun -p gpufast --gres=gpu:1 --time=00:08:00 ~/gpu_check.sh     # verify
