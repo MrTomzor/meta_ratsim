@@ -262,6 +262,45 @@ fi
 [[ "$DRV_MAJ" =~ ^[0-9]+$ ]] || DRV_MAJ=""
 ```
 
+### 0.6 How fast is the cluster, actually? (measured 2026-08-06)
+
+**A single run is ~3× slower on the cluster than on the laptop.** The cluster's value here is
+parallelism and wall-clock limits, not per-run speed.
+
+Identical config both sides — `method=ppo world=maze_default total_steps=20000 n_stages=1`:
+
+| | laptop (Ryzen 7 PRO 7840U, Zen 4) | RCI `n23`/`n27` (Xeon Gold 6150 @ 2.70 GHz, 2017 Skylake-SP) |
+|---|---|---|
+| overall `fps` | **816** | **232** (4 CPUs) → **280** (16 CPUs) |
+| `rollout_fps` | ~1000 | ~290 (4) → ~350 (16) |
+| 20k steps, wall | **25 s** | 88 s (4) → 73 s (16) |
+
+Raw sim stepping, no learning (`python -m ratsim.fps_test --world maze_default --max-steps 3000`):
+
+| CPUs allocated | mean FPS |
+|---|---|
+| 1 | 386 |
+| 4 | 1203 |
+| 8 | 1672 |
+| 16 | 1877 |
+| laptop (16 threads) | **2970** |
+
+Two things to take from this:
+
+- **Never let a job default to 1 CPU.** `sbatch --wrap` without `--cpus-per-task` gives you one,
+  and that alone costs **3×** on raw stepping (386 vs 1203). `train_job.sbatch` asks for 4.
+- **Raw stepping scales with CPUs but training barely does.** 4→16 CPUs is +56% on `fps_test` and
+  only +20% on training throughput, so above ~4–8 cores the bottleneck is the single-threaded
+  Python side (env wrapper, obs assembly, PPO forward), not Unity. Asking for 16 mostly buys
+  queue wait. The V100 is irrelevant for PPO `n_envs=1` — it is not compute-bound.
+
+The per-core gap is expected: the Xeon Gold 6150 is a 2017 server part optimised for core count,
+and both Unity's single-env step and the Python loop are latency-bound single-thread work where a
+modern laptop core wins. Don't read it as a misconfiguration.
+
+**Watch out:** these are `gpufast` nodes (`n23`, `n27`, `n28`, all the same Xeon). Nodes are
+heterogeneous — re-measure on `gpu`/`gpulong` before planning long runs there.
+
 ---
 
 ## 1. The headless-rendering question — MEASURED (Phase 0a done, 2026-08-06)
@@ -746,8 +785,28 @@ interfering.
 
 ### Phase 3 — Comfort + scale (~1–2 days, partly optional)
 
-11. TensorBoard over the login node: two-hop SSH forward, or just rsync event files out.
-    (`tensorboard.sh` needs no change if you forward properly.)
+11. **Monitoring — `rsync` out, don't run Python on `login1`.** Measured: **neither
+    `scheduler_status.py` nor TensorBoard can run on `login1` at all.** It only has Python
+    **3.6.8**, which cannot even parse `from __future__ import annotations`
+    (`SyntaxError: future feature annotations is not defined`), and the 3.12 module Python
+    doesn't run there either (glibc 2.17, §0.5 trap 4). So:
+    - **Live progress:** `ssh rci 'tail -f /mnt/personal/$USER/logs/train-<jobid>.out'`. Pure file
+      reading, no Python, no allocation — and SB3's table already prints `fps` / `rollout_fps`.
+    - **TensorBoard / plots / `scheduler_status`:** pull the results to the laptop and run them
+      locally. Verified working, and the whole results tree was 508 KB:
+      ```bash
+      rsync -az rci:/mnt/personal/$USER/git/ratsim_experiments/results/ ~/rci_results/
+      ```
+      Add `--include` filters for just `tensorboard/` if checkpoints get large.
+    - If you really want `scheduler_status.py` on the cluster, it has to be inside a job:
+      `srun -p cpufast --time=00:05:00 bash -c '. ~/rci_env.sh && ratsim_activate && cd
+      $RATSIM_GIT_DIR/ratsim_experiments && python scheduler_status.py'` — a whole allocation to
+      read files, so prefer the rsync.
+    - Note `scheduler_status.py` only sees **scheduler-managed** runs under
+      `results/experiments/<def>/runs/`. A direct `train.py` invocation (what `train_job.sbatch`
+      does) writes to `results/<run_name>/` and will not appear there.
+    A two-hop SSH forward to a TensorBoard running *in a job* also works, but it costs an
+    allocation and the admin monitors activity — rsync is the better default.
 12. SLURM job arrays for the run matrix, if the scheduler's own parallelism isn't the better fit.
     Decide deliberately: `scheduler_run.py` already manages port windows and resume, so it may be
     simpler to run *one* long `sbatch` job hosting the scheduler than N array tasks.
