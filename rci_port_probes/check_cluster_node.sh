@@ -150,14 +150,30 @@ say ""
 
 # --- 6. Networking ---------------------------------------------------------
 say "6. Networking"
-if command -v ss >/dev/null 2>&1; then ok "ss present (start_ratsim_headless.sh requires it)"
-else bad "ss missing (iproute2) -- start_ratsim_headless.sh will refuse to run"; fi
-INUSE=$(ss -tln 2>/dev/null | grep -cE ':(9[0-9]{3}) ' || true)
-if [ "${INUSE:-0}" -gt 0 ]; then
-  warn "$INUSE listener(s) already on ports 9000-9999 on this node -- port collision risk is REAL here"
-  ss -tln 2>/dev/null | grep -E ':(9[0-9]{3}) ' | sed 's/^/           /'
+# Look up ss by absolute path too. If you run this probe interactively (srun
+# --pty bash -i) it is on PATH, but a real batch job gets only
+# /usr/local/bin:/usr/bin -- so a bare `command -v ss` here PASSES for a tool
+# the job would then fail to find. That mismatch cost a job once already.
+SS_BIN=""
+for c in ss /sbin/ss /usr/sbin/ss; do
+  if p="$(command -v "$c" 2>/dev/null)"; then SS_BIN="$p"; break; fi
+done
+if [ -z "$SS_BIN" ]; then
+  bad "ss not found anywhere (iproute2 missing)"
+elif command -v ss >/dev/null 2>&1; then
+  ok "ss on PATH ($SS_BIN)"
 else
-  ok "no listeners on 9000-9999 right now"
+  warn "ss exists at $SS_BIN but is NOT on PATH -- a batch job would not see it."
+  info "rci_env.sh appends /sbin:/usr/sbin for exactly this reason"
+fi
+if [ -n "$SS_BIN" ]; then
+  INUSE=$("$SS_BIN" -tln 2>/dev/null | grep -cE ':(9[0-9]{3}) ' || true)
+  if [ "${INUSE:-0}" -gt 0 ]; then
+    warn "$INUSE listener(s) already on ports 9000-9999 on this node -- port collision risk is REAL here"
+    "$SS_BIN" -tln 2>/dev/null | grep -E ':(9[0-9]{3}) ' | sed 's/^/           /'
+  else
+    ok "no listeners on 9000-9999 right now"
+  fi
 fi
 if timeout 5 bash -c 'exec 3<>/dev/tcp/pypi.org/443' 2>/dev/null; then
   ok "outbound internet works from this node (pip install possible here)"
@@ -215,7 +231,7 @@ else
   UP=0; i=0
   for i in $(seq 1 40); do
     sleep 1
-    if ss -tln 2>/dev/null | grep -q ":${PORT} "; then UP=1; break; fi
+    if "${SS_BIN:-ss}" -tln 2>/dev/null | grep -q ":${PORT} "; then UP=1; break; fi
     if [ -n "$UPID" ] && ! kill -0 "$UPID" 2>/dev/null; then break; fi
   done
 

@@ -104,15 +104,22 @@ Note: `ratsim_experiments` is intentionally **not** pip-installed. It's a script
 
 ### Headless display for the Unity binary
 
-Unity needs an X server even in compute-only scenes (for now). `ratsim/scripts/setup_headless_display.sh` (run once, with sudo) sets up a virtual X server on `:99`:
+**Unity needs a real, running X server even with `-batchmode -nographics`** — that was measured, not assumed: with `DISPLAY` unset, or set to a display with no server behind it, the build segfaults in ~2 s, 3/3 deterministically. What `-nographics` removes is the *GPU* dependency (`Forcing GfxDevice: Null`), not the X dependency.
+
+`start_ratsim_headless.sh <binary>` has two display modes:
+
+- **`xvfb`** (default when `xvfb-run` or `Xvfb` is on PATH) — the script starts a throwaway X server for that instance and runs Unity `-batchmode -nographics`. No root, nothing to set up in advance, works on an HPC compute node. **~2.2× faster than rendering** (~2740 vs ~1230 FPS on `maze_memorymaze_11x11_wells`).
+- **`gfx`** — attaches to a pre-existing server (default `:99`) and lets Unity render normally. **Required for camera/RGBD agents**: `-nographics` gives Unity a null graphics device, so cameras produce nothing.
+
+Select with `--xvfb` / `--gfx` or `RATSIM_XVFB=1` / `RATSIM_XVFB=0`. `unity_launcher.py` spawns through this script, so training inherits the same behaviour. Pidfiles and Unity logs go to `$RATSIM_RUNDIR` (default `/tmp`) — set it per-job on a shared machine, since a colliding `ratsim_<port>.pid` means one job kills another's Unity. `stop_ratsim_headless.sh --port <p>` / `--all` tears an instance down, including the X server the launcher started for it.
+
+For the **`gfx`** mode, `ratsim/scripts/setup_headless_display.sh` (run once, with sudo) sets up a persistent X server on `:99`:
 - **NVIDIA path**: binds Xorg to the GPU's PCI bus; renders on the GPU.
 - **Fallback path**: `xserver-xorg-video-dummy` + Mesa llvmpipe (CPU rendering).
 
 The Xorg config is cached at `/etc/X11/xorg-ratsim.conf` — **re-run the setup script after driver changes**, otherwise it'll keep using the path it took on first run (e.g. llvmpipe from before the NVIDIA driver was installed). Verify with `DISPLAY=:99 glxinfo | grep renderer`.
 
-`start_ratsim_headless.sh <binary>` attaches the Unity binary to `DISPLAY=:99` and waits for TCP:9000. `stop_ratsim_headless.sh <binary>` kills the Unity process.
-
-Xorg is installed as a systemd unit (`xorg-ratsim.service`, `enable --now`) so it persists across reboots without re-running setup. Only re-run setup if the NVIDIA driver changes.
+Xorg is installed as a systemd unit (`xorg-ratsim.service`, `enable --now`) so it persists across reboots without re-running setup. Only re-run setup if the NVIDIA driver changes. With xvfb mode as the default, this is now only needed for camera runs.
 
 Idle Xorg is cheap (~20-50 MB RAM, near-zero CPU). To stop/disable anyway:
 ```bash
@@ -123,7 +130,7 @@ sudo systemctl start xorg-ratsim         # re-enable when needed
 
 A desktop viewer (VNC/xrdp/GDM) on the same box coexists with `:99` — each uses its own display number. Check `ls /tmp/.X11-unix/` to see all active X sockets.
 
-**Possible future improvement**: if no cameras are ever used in the build, adding `-batchmode -nographics` to the launcher lets Unity skip rendering entirely and drops the X-server dependency — worth trying for perf on compute-only runs.
+**Possible future improvement**: Unity 6000.1's **Dedicated Server** build target strips graphics at build time, which would remove the X-server dependency entirely (`-nographics` does not — see above). It would also disable cameras, so it needs a separate build if RGBD agents stay in use.
 
 ### GPU vs CPU per method
 

@@ -9,8 +9,9 @@ a SLURM-scheduled HPC cluster at CTU. Written after reading the cluster's
 
 **Epistemic status:** every claim about *our code* below was verified by reading the
 source (file:line given). **§1 was verified empirically on the laptop (2026-08-06), and
-it overturned this doc's original conclusion.** **Phase 0 is now COMPLETE — the probe has
-been run on a real RCI compute node (2026-08-06) and the build boots headless there.**
+it overturned this doc's original conclusion.** **Phases 0 and 1 are now COMPLETE — the probe has
+been run on a real RCI compute node and a 20k-step PPO training ran to completion there
+(2026-08-06), with checkpoints and episode logs readable from `login1`.**
 Measured cluster facts are in §0.5; they supersede the wiki wherever they disagree. The
 wiki's example outputs are visibly stale (its `nvidia-smi` sample shows driver 418 / CUDA
 10.1, i.e. ~2019, while the sidebar advertises an "H200 nodes upgrade 2025"), so treat its
@@ -203,10 +204,19 @@ pulls in `X11`, `Mesa`, `libglvnd`, and `libdrm`, which is exactly the set Unity
 `CUDA/12.x` modules exist up to 13.0.2 but aren't needed: pip torch/JAX wheels bundle their own
 CUDA runtime.
 
-### Four traps that cost time here — all measured, all with confusing symptoms
+### Five traps that cost time here — all measured, all with confusing symptoms
 
-1. **`ml` only exists in a login shell.** A `#!/bin/bash` script under `srun`/`sbatch` has no
-   `module` function and every `ml` line silently does nothing. **Use `#!/bin/bash -l`.**
+1. **`ml` does not exist inside a SLURM job, and `#!/bin/bash -l` does not fix it.** `module` is
+   a shell function, and `/etc/profile.d/lmod.sh` refuses to define it under a resource manager:
+   ```sh
+   # NOOP if running under known resource manager
+   if [ ! -z "$SLURM_NODELIST" ];then return; fi
+   ```
+   So every `ml` line in a job script silently does nothing. It *appears* to work when you test
+   via `srun --pty bash -i` or `bash -lc "srun ..."`, because there an interactive login shell
+   already initialised Lmod and SLURM propagated the exported function. **Fix: source
+   `rci_port_probes/rci_env.sh`**, which sets `MODULEPATH` and sources Lmod's own
+   `$LMOD_PKG/init/bash` directly — doing what that profile script would have done past its guard.
 2. **Never pipe `ml`.** `ml Python/... | tail -2` runs it in a subshell, so the environment
    change is discarded — it *looks* like it worked and the module isn't loaded. Traps 1 and 2
    each produced a confusingly "successful" probe run that was still on system Python 3.6.8.
@@ -225,6 +235,16 @@ CUDA runtime.
    It is built for the compute nodes' glibc 2.28; login1 has 2.17. So you cannot even sanity-
    check the venv from the login node — every venv operation belongs in a job. (`scheduler_status`
    is unaffected: it only reads files.)
+5. **A batch job's `PATH` is `/usr/local/bin:/usr/bin` — no `/sbin`.** So `ss` (at `/sbin/ss`) is
+   invisible, and `start_ratsim_headless.sh` aborted with `missing 'ss' (install iproute2)`.
+   This is trap 1's shape again: `srun --pty bash -i` *does* have `/sbin` on `PATH`, so
+   `check_cluster_node.sh` had cheerfully reported "ss present" for a binary the real job could
+   not find. Fixed on both sides — `rci_env.sh` appends `/sbin:/usr/sbin`, the launcher also looks
+   up `ss` by absolute path and falls back to a bash `/dev/tcp` probe, and the node probe now
+   distinguishes "on PATH" from "exists but not on PATH".
+   **General lesson: verify capabilities from a batch job, not an interactive one.** Interactive
+   and batch shells differ in at least `PATH` and Lmod, and interactive is the more generous of
+   the two — so every interactive probe is optimistic by construction.
 
 ### A non-Lmod trap: `nvidia-smi` writes failures to *stdout*
 
@@ -394,10 +414,10 @@ false conclusion. Three traps, all worth avoiding:
 | # | Issue | Evidence | Severity |
 |---|---|---|---|
 | 1 | **Hardcoded TCP ports** — ⚠️ **collision confirmed observed: 2 foreign listeners in 9000–9999 on the probed node** | `ratsim/ratsim/unity_launcher.py:40` `PERSISTENT_PORT = 9000`, `:46` `FRESH_PORT_BASE = 9100`; `ratsim_experiments/scheduler/ports.py:20` `PortAllocator(start=9100, window_size=10)` | High |
-| 2 | **Pidfiles / logs in shared `/tmp`** — ⚠️ **`$TMPDIR` measured unset on RCI, so the naive path is what runs** | `unity_launcher.py:49` `PIDFILE_TEMPLATE = "/tmp/ratsim_{port}.pid"`; `start_ratsim_headless.sh:56` same path, default log `/tmp/ratsim_<port>.log` | High |
+| 2 | **Pidfiles / logs in shared `/tmp`** — 🟡 **half-fixed: both the launcher script and `unity_launcher.py` now honour `$RATSIM_RUNDIR` (default `/tmp`), and `train_job.sbatch` points it at the per-job `$TMPDIR`.** What remains is making the code itself notice `$SLURM_JOB_ID` so a hand-run script on a node can't fall back to bare `/tmp` | `unity_launcher.py` `_rundir()`; `start_ratsim_headless.sh` `RUNDIR=`; `rci_port_probes/train_job.sbatch` | Medium (was High) |
 | 3 | **`install.sh` hardcodes `$HOME` paths** | `install.sh:20` `GIT_DIR="${HOME}/git"`, `:22` `VENV_DIR="${HOME}/ratvenv"` | Medium |
 | 4 | **`install.sh` preflight demands apt** | `install.sh:53-63` errors out telling you to `sudo apt install python3-venv` | Medium (trivial fix) |
-| 5 | ~~**CUDA / driver version matching**~~ — **RESOLVED for `gpufast`: driver 575 ⇒ default PyPI torch + `jax[cuda12]` both fine.** Re-check on other partitions. New sub-risk: V100 lacks bf16 (§0.5) | `CLAUDE.md` § "CUDA / driver compatibility"; driver measured 575.51.03 | Low |
+| 5 | ~~**CUDA / driver version matching**~~ — **RESOLVED for `gpufast`, but *not* with default wheels: driver 575 + V100 (sm_70) needs `cu126` explicitly.** Default PyPI torch (`cu130`) wants driver ≥580; `cu128` installs and reports `cuda available: True` but ships CC≥9.0 kernels only and dies at the first matmul. `install.sh` now picks the index from driver **and** compute capability. `jax[cuda12]` is fine as-is. Re-check on other partitions. New sub-risk: V100 lacks bf16 (§0.5) | measured driver 575.51.03; `torch 2.13.0+cu126` arch_list `sm_50..sm_90`, matmul OK | Low |
 | 6 | **`setup_headless_display.sh` unusable** | Needs root + systemd; see §1 | Medium (superseded by `xvfb-run`) |
 | 6b | **`start_ratsim_headless.sh` hardwires `DISPLAY=:99`** | `:24` `DISPLAY_NUM=${DISPLAY_NUM:-:99}`, `:58` requires `/tmp/.X11-unix/X99` to pre-exist | Medium — must learn to spawn its own xvfb |
 | 6c | **Nothing loads the `Xvfb` module** | Measured: `Xvfb` is not on `PATH` on RCI without `ml Xvfb` | Medium — every job script needs it |
@@ -608,7 +628,26 @@ Then `ssh rci '<cmd>'` works non-interactively for the whole session.
 
 **Exit criteria:** `ssh rci true` succeeds non-interactively; `squeue -u $USER` is empty.
 
-### Phase 1 — First single-GPU training job (~1 day)
+### Phase 1 — First single-GPU training job — ✅ COMPLETE (2026-08-06)
+
+**Exit criteria met.** Job `11314758`, `gpufast` node `n23`, `COMPLETED` in **1:47**, exit `0:0`,
+MaxRSS 1.19 GB:
+
+```
+Tesla V100-SXM2-32GB, 575.51.03
+rundir:     /tmp/ratsim-job-11314758          # per-job, not shared /tmp
+base_port:  9800                              # derived from $SLURM_JOB_ID
+launching ForagerSimBuildV1.x86_64 under xvfb-run -nographics port=9800
+TCP server up on port 9800 after 1s (pid 94041)
+Total steps this invocation: 20000
+```
+
+Artifacts written to `/mnt/personal` and read back **from `login1`**: `checkpoints/final.zip`,
+`checkpoints/stage_0.zip` + `stage_0.done`, `DONE`, `run_config.json`, 10 episodes in
+`train_episodes.jsonl`, and a TensorBoard event file. No pidfiles left behind, no leaked Unity or
+Xvfb, `squeue -u $USER` empty afterwards. Risk #8 ("results dir fixed inside the repo") is a
+non-issue as long as the repo itself lives on `/mnt/personal`, which it does.
+
 
 1. ✅ **DONE.** `install.sh` now honours `RATSIM_GIT_DIR` / `RATSIM_VENV_DIR`, defaulting to the
    old `$HOME` paths so laptop behaviour is unchanged.
@@ -624,33 +663,71 @@ Then `ssh rci '<cmd>'` works non-interactively for the whole session.
    the meta-repo must be a **sibling** of the others because its symlinks are relative.
    Venvs at `/mnt/personal/$USER/ratvenv`. Job script at `~/install_job.sh`, logs to
    `/mnt/personal/$USER/logs/install-<jobid>.out`.
-4. ~~Select torch/JAX wheels from the driver reading~~ — **settled: driver 575 ⇒ plain
-   `pip install torch` and `jax[cuda12]`.** No index URLs needed. Verify with
-   `python -c "import torch; print(torch.cuda.is_available())"` inside a GPU job, then set
-   DreamerV3 precision to `float16`/`float32` for the V100 (§0.5).
-5. Teach `start_ratsim_headless.sh` an xvfb mode (`RATSIM_XVFB=1` or `--xvfb`): wrap the launch
-   in `xvfb-run -a` and add `-batchmode -nographics`. **Keep** the X-socket precondition check
-   at `:58` for the existing `DISPLAY=:99` path — §1 confirms an X server really is required, so
-   that check is correct, not vestigial; it just must not apply when xvfb provides the display.
-   Two traps the script must handle, both hit during Phase 0a testing:
-   - `xvfb-run` is a shell script — its Unity child **survives killing the wrapper**. The pidfile
-     must record the *Unity* pid (`pgrep -x ForagerSimBuild`), or the launch must use `setsid`
-     and the stop path must kill the process group. Otherwise `stop_ratsim_headless.sh` silently
-     leaves an instance holding the port.
-   - `xvfb-run -a` picks its own display number and leaves a stray `Xvfb` behind if killed
-     ungracefully. The stop path should reap it.
-   Given the measured ~2.2× speedup, consider making this the **default** on Linux rather than
-   an opt-in.
-   **Third trap, specific to RCI:** `xvfb-run` may not exist even when `Xvfb` does (§1). The
-   script must fall back to starting `Xvfb` itself on a free display and exporting `DISPLAY`.
-   `check_cluster_node.sh` already implements both branches — reuse that logic.
-6. Write a minimal `sbatch` wrapper: `ml Python/...` **and `ml Xvfb`**, venv activate,
-   `export TMPDIR=/mnt/job-$SLURM_JOB_ID` (or an `$SLURM_JOB_ID`-scoped dir — `$TMPDIR` is unset
-   on RCI, §0.5), `export RATSIM_UNITY_BIN=...`, one `train.py` invocation. Run one short job
-   end-to-end on `gpufast` with an explicit `--time`.
+4. ✅ **DONE — but not as predicted.** Plain `pip install torch` does *not* work here: default
+   wheels are `cu130` (driver ≥580) and `cu128` drops sm_70, so the V100 fails at the first
+   matmul despite `torch.cuda.is_available()` returning True. `install.sh` now derives the index
+   URL from driver version **and** compute capability, landing on `cu126`. `jax[cuda12]` needed
+   no change. Verified on a V100 node: `torch 2.13.0+cu126`, arch_list `sm_50..sm_90`, real
+   matmul finite, `jax 0.4.33` sees `CudaDevice(id=0)`. Still to do: set DreamerV3 precision to
+   `float16`/`float32` for the V100 (§0.5) — it has no bf16.
+5. ✅ **DONE — `start_ratsim_headless.sh` has two display modes.**
+   - **`xvfb`** — the script provides the display itself and runs Unity `-batchmode -nographics`.
+     Prefers `xvfb-run -a`; if only the `Xvfb` binary exists (the RCI module case) it starts its
+     own server on a free display and exports `DISPLAY`.
+   - **`gfx`** — the old `DISPLAY=:99` path, unchanged, X-socket precondition **kept** (§1 proves
+     it is a real requirement, not vestigial — it just must not apply when xvfb owns the display).
+     Use this for camera/RGBD agents: `-nographics` gives Unity a null graphics device.
+   - Selection: `--xvfb` / `--gfx`, or `RATSIM_XVFB=1` / `0`. **Default is auto: xvfb when an
+     xvfb binary is present, else gfx** — so the ~2.2× speedup is the default on Linux, as
+     suggested, while a box with no xvfb keeps working exactly as before.
 
-**Exit criteria:** one training run completes a stage on a compute node and its checkpoint +
-`train_episodes.jsonl` are visible from `login1`.
+   How the three known traps are handled, all re-verified on the laptop:
+   - *xvfb-run's Unity child survives the wrapper.* The pidfile now records the **Unity** pid,
+     found by matching `-port <PORT>` in `/proc/<pid>/cmdline` among `pgrep -x <comm>` hits —
+     matching on the port, not just the comm, also stops two concurrent launches of the same
+     build from stealing each other's pid. Measured: pidfile got the Unity pid `1520124`, not the
+     `xvfb-run` wrapper `1520101`. Killing Unity is then sufficient: `xvfb-run` tears down its own
+     Xvfb when the command exits (verified — no survivors).
+   - *Stray `Xvfb` when killed ungracefully.* The own-Xvfb path passes **`-terminate`**, so the
+     server exits when its last client goes away. Verified: `kill -9 <unity>` alone left no Xvfb.
+     Belt-and-braces, the launcher writes `.xpid`/`.pgid` sidecars next to the pidfile and
+     `stop_ratsim_headless.sh` reaps both (`--all` too), guarding the group kill with a check that
+     the group still holds something recognisably ours.
+   - *Display-number selection.* Judged by the **lock file** `/tmp/.X<n>-lock` (and `/proc`, not
+     `kill -0`, since another user may own it), not by `/tmp/.X11-unix/X<n>`: a SIGKILLed Xvfb
+     leaves its socket behind and those accumulate — there were 14 stale ones on the laptop from
+     Phase 0a. Candidates are port-seeded so concurrent launches don't race, a leftover socket we
+     own is cleared first so its reappearance is real evidence our server bound, and failure just
+     moves to the next candidate.
+
+   `unity_launcher.py` needed a matching change: pidfile paths now come from `_rundir()`
+   (`$RATSIM_RUNDIR`, default `/tmp`) so the two cannot disagree, and `_kill_owned` reaps the
+   sidecars. Verified end-to-end through `allocate_unity_instances(fresh=True)`: correct pid in
+   the pidfile, TCP connect OK, and `atexit` left no process, no listener and no stale file.
+
+   Functional check on the laptop through the new launcher, not just "it boots":
+   `python -m ratsim.fps_test --world maze_memorymaze_11x11_wells --agent
+   sphereagent_2d_lidar_wells --max-steps 3000` → **2970 FPS**, consistent with the ~2740
+   measured in §1 for `xvfb-run -nographics` and ~2.4× the ~1230 GUI baseline.
+6. ✅ **DONE — `rci_port_probes/train_job.sbatch`.** Sources `rci_env.sh` (Lmod + `Python`/`Xvfb`
+   modules + `RATSIM_*` paths + per-job `$TMPDIR`), activates the venv, sets
+   `RATSIM_RUNDIR="$TMPDIR"` so pidfiles never land in shared `/tmp`, forces `RATSIM_XVFB=1` so
+   the job fails loudly if xvfb ever goes missing rather than silently trying `:99`, derives an
+   interim `base_port` from `$SLURM_JOB_ID` (train.py accepts `base_port=`), and passes `"$@"`
+   through to `train.py`. Defaults to `cpufast` with no GPU (PPO `n_envs=1` is faster on CPU);
+   override per submission, e.g.
+   `sbatch -p gpufast --gres=gpu:1 --time=00:30:00 train_job.sbatch method=ppo world=maze_default
+   total_steps=20000 n_stages=1`. It reaps leftover Unity instances on exit via
+   `stop_ratsim_headless.sh --all`, and captures `train.py`'s exit code without `set -e` skipping
+   that cleanup.
+
+**Exit criteria:** ✅ met — see the top of this phase for the measured run.
+
+**One thing this run did NOT prove:** the first attempt (job `11314754`) failed in 8 s on
+`missing 'ss'` — trap 5. That is worth remembering as the *class* of remaining risk: Phase 1 was
+exercised by exactly one PPO run, so anything a batch job needs that only an interactive shell
+provides is still unproven. `train.py`'s **`n_envs>1`** path and the **dreamer** venv have not
+been run in a job at all yet.
 
 ### Phase 2 — Make it safe for concurrent jobs (~1–2 days)
 

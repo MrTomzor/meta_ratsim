@@ -43,6 +43,16 @@ module load Python/3.12.3-GCCcore-13.3.0
 module load Xvfb/21.1.14-GCCcore-13.3.0
 module load git/2.45.1-GCCcore-13.3.0
 
+# --- PATH -------------------------------------------------------------------
+# A SLURM batch job starts with PATH=/usr/local/bin:/usr/bin only -- no /sbin.
+# An interactive `srun --pty bash -i` DOES have it, which is how a probe can
+# report "ss present" for a tool the real job then cannot find. Same trap shape
+# as the Lmod one above: interactive and batch shells are not the same shell.
+case ":$PATH:" in
+  *:/sbin:*) ;;
+  *) export PATH="$PATH:/sbin:/usr/sbin" ;;
+esac
+
 # --- paths ------------------------------------------------------------------
 export RATSIM_GIT_DIR="${RATSIM_GIT_DIR:-/mnt/personal/$USER/git}"
 export RATSIM_VENV_DIR="${RATSIM_VENV_DIR:-/mnt/personal/$USER/ratvenv}"
