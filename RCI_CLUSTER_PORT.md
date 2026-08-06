@@ -9,7 +9,7 @@ a SLURM-scheduled HPC cluster at CTU. Written after reading the cluster's
 
 **Epistemic status:** every claim about *our code* below was verified by reading the
 source (file:line given). **§1 was verified empirically on the laptop (2026-08-06), and
-it overturned this doc's original conclusion.** **Phases 0 and 1 are now COMPLETE — the probe has
+it overturned this doc's original conclusion.** **Phases 0, 1 and 2 are now COMPLETE — the probe has
 been run on a real RCI compute node and a 20k-step PPO training ran to completion there
 (2026-08-06), with checkpoints and episode logs readable from `login1`.**
 Measured cluster facts are in §0.5; they supersede the wiki wherever they disagree. The
@@ -303,6 +303,11 @@ Raw sim stepping, no learning (`python -m ratsim.fps_test --world maze_default -
 | 16 | 1877 |
 | laptop (16 threads) | **2970** |
 
+> ⚠️ **These training numbers were measured with OpenMP oversubscribed** (see the thread trap
+> below) and are therefore a *floor*, not a clean laptop-vs-cluster comparison. The raw
+> `fps_test` figures are unaffected — Unity does its own threading. A single training run has not
+> been re-measured with correct thread limits.
+
 Two things to take from this:
 
 - **Never let a job default to 1 CPU.** `sbatch --wrap` without `--cpus-per-task` gives you one,
@@ -315,6 +320,31 @@ Two things to take from this:
 The per-core gap is expected: the Xeon Gold 6150 is a 2017 server part optimised for core count,
 and both Unity's single-env step and the Python loop are latency-bound single-thread work where a
 modern laptop core wins. Don't read it as a misconfiguration.
+
+### 🔥 The thread-oversubscription trap — worth more than every other perf fix here
+
+**`/proc/cpuinfo` reports the whole machine (32 CPUs on `n23`) while SLURM cgroup-limits you to
+`--cpus-per-task`.** PyTorch and OpenMP size their thread pools from the machine count, so a job
+allocated 16 cores runs ~32 OpenMP threads *per process*.
+
+Measured on two concurrent PPO runs in one 16-core allocation:
+
+| | `opt_seconds` per iteration | `rollout_fps` | overall `fps` |
+|---|---|---|---|
+| default threads (~32 per process, 2 processes) | **188** | ~300 | **20** |
+| `OMP_NUM_THREADS=4` | **1.46** | ~355 | **434–452** |
+| laptop, single run | ~0.5 | ~1000 | 816 |
+
+**~130× on `opt_seconds`, ~22× on throughput.** Note how it hides: `rollout_fps` stays *perfectly
+healthy* because Unity does its own threading, and only the optimize phase collapses — so the
+symptom reads as "the cluster's CPU is slow" rather than "we misconfigured threads". It also means
+every earlier single-run timing in this doc was quietly paying some of this cost.
+
+Fixed in `rci_env.sh`, which defaults `OMP_NUM_THREADS`/`MKL`/`OPENBLAS`/`NUMEXPR` to
+`$SLURM_CPUS_PER_TASK`. **A job running several trainings at once must lower it further to its
+per-run share** — `scheduler_job.sbatch` sets 4 to match `needs.cpu_slot` in `machines/rci.yaml`.
+`needs.cpu_slot` is only scheduler bookkeeping and does *not* constrain a child's thread count, so
+these two must be kept in sync by hand.
 
 **Watch out:** these are `gpufast` nodes (`n23`, `n27`, `n28`, all the same Xeon). Nodes are
 heterogeneous — re-measure on `gpu`/`gpulong` before planning long runs there.
@@ -790,15 +820,47 @@ been run in a job at all yet.
 
 7. ✅ **DONE — port allocation (#1).** See §2.5 below for what it took.
 8. ✅ **DONE — pidfiles + logs (#2)**, in the same change as #7 as planned.
-9. Add `scheduler/machines/rci.yaml` with RCI-appropriate `cpu_slot` / `n_envs` / device args.
-   Note nothing on the cluster currently produces scheduler-managed runs, so `scheduler_status.py`
-   has nothing to show until this lands.
+9. ✅ **DONE — `scheduler/machines/rci.yaml`** plus `rci_port_probes/scheduler_job.sbatch` (one job
+   hosts the scheduler; deliberately not a job array, since the scheduler already owns port
+   windows, resume and RAM kills). Validated against **all 29 experiment defs** locally, then run
+   end-to-end on `gpufast`: 2 PPO seeds × 2 stages, **4/4 stage `.done` markers, `done runs: 2/2`**,
+   and `scheduler_status.py _rci_smoke` rendered the full dashboard **from login2** — progress bars,
+   per-method FPS, reward/pickup tables.
+
+   Sizing is `cpu_slot: 16` with `needs.cpu_slot: 4`, i.e. pack four runs rather than give one run
+   16 cores: a single run stops gaining at ~4 cores (§0.6), and two concurrent runs measured
+   **~440 fps each** against **286** for one. `n_envs` is deliberately **1** everywhere (unlike
+   `default.yaml`'s 4) — concurrent runs buy the same throughput here without `SubprocVecEnv`, and
+   `n_envs>1` still has never been run in a job.
+
+   Two things this uncovered:
+   - **`rci_env.sh` must export `PPO_PYTHON_PATH` / `DREAMER_PYTHON_PATH`.** The scheduler resolves
+     each method's interpreter through an *env var name* (`config.py DEFAULT_PYTHON_ENV`), not a
+     path — that indirection is what lets one scheduler drive both venvs.
+   - **DreamerV3 defaults to `jax.compute_dtype: bfloat16`**, which the V100 (sm_70) has no native
+     path for. `rci.yaml` sets `float16`. `torch.cuda.is_bf16_supported()` reports `True` on this
+     GPU regardless, so don't take that as evidence the default is fine.
+
+   **Also found and fixed a pre-existing scheduler race.** `PortAllocator` releases a window and
+   can immediately re-hand those ports to the next stage, while the previous stage's Unity is still
+   shutting down. Stage 1 of a run failed twice, on 9630 then 9620 — precisely that job's stage-0
+   ports (`9100 + (11315212 % 90) * 10 = 9620`). A later scan confirmed both were free and nothing
+   foreign was listening, and that `ip_local_port_range` is the standard 32768–60999, so neither a
+   stranger nor ephemeral-port overlap was involved. The old TCP-connect check papered over this
+   (a dying Unity refuses connections slightly before it releases the bind); the stricter bind test
+   exposed it. Fix: on an *explicitly requested* port, wait up to 20 s for it to free rather than
+   failing — failing kills the run, and moving to another port would desync the scheduler's
+   accounting.
+
+   Also: run the scheduler as `python -u`, or its progress sits in a pipe buffer and `tail -f` on
+   the SLURM log looks dead for minutes.
 10. ~~Confirm results land on shared storage (#8)~~ — **non-issue.** The repo lives on
     `/mnt/personal`, so `results/` is already on shared storage; phase 1's checkpoints were read
     back from a login node.
 
 **Exit criteria:** ✅ met — two trainings on one node (`n26`, job `11315163`) took ports **9130**
 and **9131**, both completed 12 000 steps, exit 0, and left no pidfiles or stray processes.
+**Phase 2 is complete**; the scheduler now runs end-to-end on the cluster (item 9).
 
 ### 2.5 What the concurrency fix actually needed (2026-08-06)
 

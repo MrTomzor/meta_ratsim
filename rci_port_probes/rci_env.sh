@@ -53,6 +53,26 @@ case ":$PATH:" in
   *) export PATH="$PATH:/sbin:/usr/sbin" ;;
 esac
 
+# --- thread limits ----------------------------------------------------------
+# CRITICAL on a shared node. /proc/cpuinfo reports the whole machine (32 CPUs on
+# n23) while SLURM cgroup-limits you to --cpus-per-task. PyTorch/OpenMP read the
+# machine count, so a job allocated 16 cores spawns ~32 OpenMP threads per
+# process and thrashes. Measured, and it is brutal: two concurrent PPO runs went
+# to opt_seconds=188 per iteration and fps 20, against opt_seconds~0.5 and
+# fps 816 on the laptop -- ~390x slower per gradient step, while rollout_fps
+# stayed a healthy ~300. The rollout looks fine and only the optimize phase
+# collapses, which makes this easy to misread as "the cluster CPU is slow".
+#
+# Set to the allocation by default. A job running SEVERAL trainings at once must
+# lower it to its per-run share (see scheduler_job.sbatch) or the same
+# oversubscription returns, just divided differently.
+if [ -n "${SLURM_CPUS_PER_TASK:-}" ]; then
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$SLURM_CPUS_PER_TASK}"
+  export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$OMP_NUM_THREADS}"
+  export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$OMP_NUM_THREADS}"
+  export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-$OMP_NUM_THREADS}"
+fi
+
 # --- paths ------------------------------------------------------------------
 export RATSIM_GIT_DIR="${RATSIM_GIT_DIR:-/mnt/personal/$USER/git}"
 export RATSIM_VENV_DIR="${RATSIM_VENV_DIR:-/mnt/personal/$USER/ratvenv}"
@@ -75,3 +95,11 @@ fi
 # "libpython3.12.so.1.0: cannot open shared object file".
 ratsim_activate()        { . "$RATSIM_VENV_DIR/venv/bin/activate"; }
 ratsim_activate_dreamer() { . "$RATSIM_VENV_DIR/dreamer_venv/bin/activate"; }
+
+# The scheduler resolves each method's interpreter through an env var name
+# (scheduler/config.py DEFAULT_PYTHON_ENV), not a path -- so these must be
+# exported for `scheduler_run.py --machine rci` to dispatch anything. It picks
+# the interpreter per method, which is how one scheduler process drives both the
+# SB3 venv and the DreamerV3 venv.
+export PPO_PYTHON_PATH="${PPO_PYTHON_PATH:-$RATSIM_VENV_DIR/venv/bin/python}"
+export DREAMER_PYTHON_PATH="${DREAMER_PYTHON_PATH:-$RATSIM_VENV_DIR/dreamer_venv/bin/python}"
