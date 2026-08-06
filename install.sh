@@ -15,11 +15,18 @@
 #   ./install.sh --with-unity       # also clone ratsim_unity_project (~GB)
 #   ./install.sh --with-ros2        # also clone ratsim_ros2
 #   ./install.sh --force            # delete and recreate venvs
+#
+# Env overrides (for clusters / non-$HOME layouts):
+#   RATSIM_GIT_DIR=/mnt/personal/$USER/git
+#   RATSIM_VENV_DIR=/mnt/personal/$USER/ratvenv
 set -euo pipefail
 
-GIT_DIR="${HOME}/git"
+# Overridable so the stack can live off $HOME — needed on HPC clusters where the
+# home filesystem is small/slow and data belongs elsewhere (e.g. RCI's
+# /mnt/personal/$USER). Defaults keep laptop behaviour unchanged.
+GIT_DIR="${RATSIM_GIT_DIR:-${HOME}/git}"
 META_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="${HOME}/ratvenv"
+VENV_DIR="${RATSIM_VENV_DIR:-${HOME}/ratvenv}"
 MAIN_VENV="${VENV_DIR}/venv"
 DREAMER_VENV="${VENV_DIR}/dreamer_venv"
 
@@ -50,7 +57,24 @@ done
 [[ "$WITH_UNITY" == 1 ]] && REPOS+=("ratsim_unity_project")
 [[ "$WITH_ROS2" == 1 ]] && REPOS+=("ratsim_ros2")
 
-# ----- Preflight: python3-venv must be functional ---------------------------
+# ----- Preflight: python3 must be new enough AND have venv ------------------
+# Version floor first: ratsim_wildfire_gym_env declares requires-python >=3.9,
+# and an old interpreter passes the venv check below while failing later in
+# confusing ways (CentOS 7 ships 3.6.8, which does have venv).
+MIN_PY_MINOR=9
+if ! python3 -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, ${MIN_PY_MINOR}) else 1)" 2>/dev/null; then
+  cat >&2 <<EOF
+[install] ERROR: python3 is too old ($(python3 -V 2>&1)); need >= 3.${MIN_PY_MINOR}.
+On an HPC cluster, load a newer one from the module system, e.g.:
+    module avail Python            # list what's there
+    ml Python/3.12.3-GCCcore-13.3.0
+Then re-run this script. Use the IDENTICAL ml line in every job script — a venv
+symlinks the interpreter that created it and breaks confusingly without it.
+On Debian/Ubuntu, install a newer python3 from your package manager instead.
+EOF
+  exit 1
+fi
+
 if ! python3 -c "import venv, ensurepip" 2>/dev/null; then
   PYVER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
   cat >&2 <<EOF
@@ -58,6 +82,8 @@ if ! python3 -c "import venv, ensurepip" 2>/dev/null; then
 On Debian/Ubuntu, install it with:
     sudo apt update && sudo apt install -y python3-venv python3.${PYVER#*.}-venv python3-pip
 (You may only need one of the two venv packages depending on your distro.)
+On an HPC cluster without root, load a module-provided Python instead:
+    ml Python/3.12.3-GCCcore-13.3.0
 EOF
   exit 1
 fi
@@ -98,7 +124,10 @@ for repo in "${REPOS[@]}"; do
   target="$GIT_DIR/$repo"
   if [[ -L "$link" ]]; then
     current="$(readlink "$link")"
-    if [[ "$current" == "$target" ]]; then
+    # Compare resolved paths, not link text: the repo commits *relative* links
+    # (../ratsim). A literal comparison against the absolute $target would
+    # rewrite them every run, dirtying the working tree and breaking git pull.
+    if [[ "$current" == "$target" ]] || [[ "$(readlink -f "$link")" == "$(readlink -f "$target")" ]]; then
       echo "[install] Symlink $repo already correct, skipping."
     else
       echo "[install] Repointing symlink $repo: $current -> $target"
@@ -146,6 +175,63 @@ echo "[install] === Main venv ==="
 # shellcheck disable=SC1091
 source "$MAIN_VENV/bin/activate"
 pip install --upgrade pip
+
+# torch arrives as a transitive dep of stable_baselines3[extra], which would take
+# it from the DEFAULT PyPI index. That is not safe: torch 2.13 defaults to CUDA 13
+# wheels, which need driver >= 580. On an older driver you get a silent
+# torch.cuda.is_available() == False. So pin the CUDA variant up front, and let
+# SB3 then see torch as already satisfied.
+#
+# CPU mode is deliberately left alone so laptop behaviour is unchanged.
+if [[ "$GPU_MODE" == "gpu" ]]; then
+  TORCH_INDEX="${RATSIM_TORCH_INDEX:-}"
+  DRV_MAJ=""
+  if [[ -z "$TORCH_INDEX" ]]; then
+    # nvidia-smi is often PRESENT on GPU-less nodes and fails at runtime, printing
+    # its error to STDOUT (not stderr) -- so test that it actually works, and then
+    # accept the result only if it is purely numeric. Without both guards the
+    # error text lands in DRV_MAJ and the (( )) comparisons below abort the script.
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+      DRV_MAJ="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1)"
+    fi
+    [[ "$DRV_MAJ" =~ ^[0-9]+$ ]] || DRV_MAJ=""
+
+    # GPU compute capability matters as much as the driver, because the choice is
+    # constrained from BOTH ends:
+    #   - too NEW a wheel DROPS old GPU archs. Measured: cu128 ships only
+    #     CC >= 9.0, so on a V100 (sm_70) torch.cuda.is_available() is True and
+    #     the first matmul dies with "no kernel image is available".
+    #   - too NEW a CUDA needs a newer DRIVER (cu130 wants driver >= 580).
+    # cu126 ships sm_50..sm_90 and needs only driver >= 525, so it is the safe
+    # default for anything up to Hopper. Blackwell (sm_100+) needs cu128/cu130.
+    CC_MAJ=""
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+      CC_MAJ="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1)"
+      [[ "$CC_MAJ" =~ ^[0-9]+$ ]] || CC_MAJ=""
+    fi
+
+    if [[ -z "$DRV_MAJ" ]]; then
+      # Happens when installing on a CPU node for later use on GPU nodes (HPC).
+      echo "[install] WARN: --gpu forced but nvidia-smi is unavailable here."
+      echo "[install]       Defaulting torch to cu126 (widest GPU arch coverage)."
+      echo "[install]       Override with RATSIM_TORCH_INDEX=<url|default> for Blackwell."
+      TORCH_INDEX="https://download.pytorch.org/whl/cu126"
+    elif (( DRV_MAJ < 525 )); then  TORCH_INDEX="https://download.pytorch.org/whl/cu118"
+    elif [[ -n "$CC_MAJ" ]] && (( CC_MAJ >= 10 )) && (( DRV_MAJ >= 580 )); then
+      TORCH_INDEX="default"
+    elif [[ -n "$CC_MAJ" ]] && (( CC_MAJ >= 9 )) && (( DRV_MAJ >= 550 )); then
+      TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+    elif (( DRV_MAJ >= 525 )); then TORCH_INDEX="https://download.pytorch.org/whl/cu126"
+    fi
+  fi
+  if [[ "$TORCH_INDEX" == "default" || "$TORCH_INDEX" == "none" ]]; then
+    echo "[install] torch: using default PyPI index (driver ${DRV_MAJ:-forced})."
+  else
+    echo "[install] torch: $TORCH_INDEX (driver ${DRV_MAJ:-unknown})"
+    pip install --index-url "$TORCH_INDEX" torch
+  fi
+fi
+
 pip install \
   scipy \
   scikit-learn \
