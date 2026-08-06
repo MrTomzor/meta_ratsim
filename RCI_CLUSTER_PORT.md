@@ -51,7 +51,8 @@ Observed on a `gpufast` compute node via `rci_port_probes/check_cluster_node.sh`
 | Driver | **575.51.03** | Supports CUDA up to **12.9**. ⚠️ **Not** "any wheel works" — see the CUDA 13 trap below. |
 | Outbound internet on compute node | ✅ works | `pip install` need not be confined to `login1`. Issue #9 dissolved. |
 | Python | system `python3` is **3.6.8** everywhere (has `venv`, so the old preflight *passed* it) | **Must use `ml Python/...`.** 3.6 is far below `requires-python >=3.9`. `install.sh` now enforces a version floor. |
-| **login1 OS** | **CentOS 7, glibc 2.17**, git 1.8.3.1 | ⚠️ **Do NOT pip install here** — see below. |
+| **login1 OS** | **CentOS 7, glibc 2.17**, git 1.8.3.1, Python 3.6.8 | ⚠️ **Do NOT pip install here** — see below. It is the *only* old login node. |
+| **login2 / login3 / login4 OS** | **Rocky Linux 8.10 / 8.8 / 8.10, glibc 2.28** | Same glibc as the compute nodes, so the `Python/3.12.3` module and the venv work here. Use `login2` for monitoring (§ phase 3 #11). |
 | **compute node OS** | **glibc 2.28**, git 2.31.1 | Modern manylinux wheels work here. |
 | `$TMPDIR` | **unset** | Must scope pidfiles/logs by `$SLURM_JOB_ID` ourselves — issue #2 confirmed live. |
 | Ports 9000–9999 on that node | **2 listeners already present** | **Issue #1 confirmed real, not theoretical.** Foreign processes occupy our default range. |
@@ -66,6 +67,23 @@ hardware per partition.
 
 **Nodes are heterogeneous**: the above is one `gpufast` node. Re-run the probe on `gpu` /
 `gpulong` before trusting driver and GPU model there.
+
+### Three things from the sysadmin's `how_to_start` worth obeying
+
+Read it directly at `~/Downloads/rci_how_to_start.html` — these are easy to miss:
+
+- **"Don't use salloc/ssh method for GPU nodes (gpufast partition), please."** An explicit request.
+  Use `srun`/`sbatch`; `ssh`-ing into an allocated GPU node is out. (Everything we do already
+  goes through `srun`/`sbatch`.)
+- **Node-local scratch is `/data/temporary/` for single-node jobs**, and `/mnt/job-<jobid>` only
+  for *multi-node* ones — described as "very fast", visible only on the allocated node, deleted
+  when the job ends. We currently scope pidfiles by `$SLURM_JOB_ID` under `$TMPDIR`/`/tmp`, which
+  is fine for a few tiny files; `/data/temporary/` is the place to look if staging the venv to
+  local disk ever becomes worthwhile (see the small-files caveat in §3). **[VERIFY]** — not yet
+  confirmed present on a node.
+- **Interactive jobs are only allowed in `cpufast`/`gpufast`/`amdfast`/`amdgpufast`**, and SMB
+  shares exist for bulk copies (`\\login3.rci.cvut.cz\personal\%username`,
+  `\\147.32.87.117\home\%username`) if `scp` is ever inconvenient.
 
 ### ⚠️ Install on a COMPUTE node, not `login1` — this reverses the obvious advice
 
@@ -452,8 +470,8 @@ false conclusion. Three traps, all worth avoiding:
 
 | # | Issue | Evidence | Severity |
 |---|---|---|---|
-| 1 | **Hardcoded TCP ports** — ⚠️ **collision confirmed observed: 2 foreign listeners in 9000–9999 on the probed node** | `ratsim/ratsim/unity_launcher.py:40` `PERSISTENT_PORT = 9000`, `:46` `FRESH_PORT_BASE = 9100`; `ratsim_experiments/scheduler/ports.py:20` `PortAllocator(start=9100, window_size=10)` | High |
-| 2 | **Pidfiles / logs in shared `/tmp`** — 🟡 **half-fixed: both the launcher script and `unity_launcher.py` now honour `$RATSIM_RUNDIR` (default `/tmp`), and `train_job.sbatch` points it at the per-job `$TMPDIR`.** What remains is making the code itself notice `$SLURM_JOB_ID` so a hand-run script on a node can't fall back to bare `/tmp` | `unity_launcher.py` `_rundir()`; `start_ratsim_headless.sh` `RUNDIR=`; `rci_port_probes/train_job.sbatch` | Medium (was High) |
+| 1 | ~~**Hardcoded TCP ports**~~ — ✅ **FIXED in phase 2 (§2.5).** Job-derived port window, bind test, ownership check, retry. Verified: two trainings on one node took 9130/9131 and both completed | was `unity_launcher.py` `FRESH_PORT_BASE`, `scheduler/ports.py` `PortAllocator(start=9100)` | None |
+| 2 | ~~**Pidfiles / logs in shared `/tmp`**~~ — ✅ **FIXED in phase 2 (§2.5).** Both the script and `unity_launcher.py` derive the dir from `$SLURM_JOB_ID` with identical precedence, and the pidfile is now an atomic reservation rather than a plain write | `unity_launcher.py` `_rundir()`; `start_ratsim_headless.sh` `RUNDIR=` / `claim_pidfile()` | None |
 | 3 | **`install.sh` hardcodes `$HOME` paths** | `install.sh:20` `GIT_DIR="${HOME}/git"`, `:22` `VENV_DIR="${HOME}/ratvenv"` | Medium |
 | 4 | **`install.sh` preflight demands apt** | `install.sh:53-63` errors out telling you to `sudo apt install python3-venv` | Medium (trivial fix) |
 | 5 | ~~**CUDA / driver version matching**~~ — **RESOLVED for `gpufast`, but *not* with default wheels: driver 575 + V100 (sm_70) needs `cu126` explicitly.** Default PyPI torch (`cu130`) wants driver ≥580; `cu128` installs and reports `cuda available: True` but ships CC≥9.0 kernels only and dies at the first matmul. `install.sh` now picks the index from driver **and** compute capability. `jax[cuda12]` is fine as-is. Re-check on other partitions. New sub-risk: V100 lacks bf16 (§0.5) | measured driver 575.51.03; `torch 2.13.0+cu126` arch_list `sm_50..sm_90`, matmul OK | Low |
@@ -770,26 +788,93 @@ been run in a job at all yet.
 
 ### Phase 2 — Make it safe for concurrent jobs (~1–2 days)
 
-7. **Port allocation (#1).** SLURM-aware base port in `unity_launcher.py` and
-   `scheduler/ports.py` — `--resv-ports`/`SLURM_STEP_RESV_PORTS`, or `SLURM_JOB_ID`-seeded offset
-   with free-port probing. Keep the laptop default at 9000/9100.
-8. **Pidfiles + logs (#2).** `$TMPDIR`- or `$SLURM_JOB_ID`-scoped paths in `unity_launcher.py:49`
-   and `start_ratsim_headless.sh:56`. **Do this in the same change as #7** — they share a root cause
-   and fixing only one leaves the silent-kill bug live.
+7. ✅ **DONE — port allocation (#1).** See §2.5 below for what it took.
+8. ✅ **DONE — pidfiles + logs (#2)**, in the same change as #7 as planned.
 9. Add `scheduler/machines/rci.yaml` with RCI-appropriate `cpu_slot` / `n_envs` / device args.
-10. Confirm results land on shared storage (#8) — add an env override for
-    `scheduler.py:57 RESULTS_DIR` if the repo can't simply live on `/mnt/personal`.
+   Note nothing on the cluster currently produces scheduler-managed runs, so `scheduler_status.py`
+   has nothing to show until this lands.
+10. ~~Confirm results land on shared storage (#8)~~ — **non-issue.** The repo lives on
+    `/mnt/personal`, so `results/` is already on shared storage; phase 1's checkpoints were read
+    back from a login node.
 
-**Exit criteria:** two jobs deliberately co-scheduled on one node both run to completion without
-interfering.
+**Exit criteria:** ✅ met — two trainings on one node (`n26`, job `11315163`) took ports **9130**
+and **9131**, both completed 12 000 steps, exit 0, and left no pidfiles or stray processes.
+
+### 2.5 What the concurrency fix actually needed (2026-08-06)
+
+The first attempt — derive a per-job base port, bind-test it before use — **was not enough, and
+the co-location test caught it.** Both trainings reported
+`TCP server up on port 9990 (pid 2770568)`: the *same port and the same pid*. Three distinct bugs,
+each invisible until the one before it was fixed:
+
+1. **A bind test is only a hint.** Two processes can both pass it and both launch. The bind has to
+   be released before Unity can take the port, so the window can never be fully closed this way.
+2. **The loser adopted the winner's Unity.** The launcher resolved "our" pid by matching
+   `-port <PORT>` in `/proc/<pid>/cmdline` — which finds *anyone's* Unity on that port. So the
+   loser wrote the winner's pid into its own pidfile, every ownership check downstream passed, and
+   its cleanup then killed the winner's simulator. Fixed by identifying our Unity by **ancestry**
+   (walk `/proc/<pid>/stat` ppids up to `$WRAPPER_PID`). Process group looked equivalent and was
+   not: the pgid must be *read*, and right after `&` the wrapper may not have called `setsid` yet,
+   so an early read returns the shell's old group and matches a stranger.
+3. **Both launches wrote the same pidfile path.** Same `$RUNDIR` + same port ⇒ same filename. The
+   loser clobbered the winner's recorded pid and then deleted the file on its own failure, leaving
+   the winner's Unity orphaned with no cleanup handle — a leak that survived process exit. Fixed
+   with an atomic reservation (`set -o noclobber`) written **before** launching.
+
+   Sharp edge inside the fix: the placeholder must be a *number*. Writing the word `"claiming"`
+   made the staleness check (which extracts digits) read it as "no pid recorded", so the loser
+   deleted the winner's fresh claim and proceeded anyway. `echo $$` is alive by definition.
+
+**The resulting design is two independent layers**, because neither covers the other's case:
+
+| Layer | Separates | Doesn't help when |
+|---|---|---|
+| Job-derived base port + bind test | different jobs, before anything launches | two runs share one `$SLURM_JOB_ID` (same job) |
+| Atomic pidfile claim in `$RUNDIR` | runs inside one job | separate jobs — their `$RUNDIR`s differ |
+| Ownership check + retry on the next port | everything else, including another *user's* process | — this is the backstop |
+
+**Known remaining limit:** a collision with a foreign process is *detected and retried*, not
+prevented — `start_ratsim_headless.sh` refuses to report success unless our own Unity holds the
+port, and `_spawn_first_free()` then moves on. Preventing it outright would need a node-wide lock,
+which is not worth it.
+
+Also fixed here: the scheduler ignores `--use-port-9000` under SLURM, and `allocate_unity_instances`
+never reuses :9000 there. On a shared node an open :9000 is far more likely to be a stranger's
+process than your Editor, and attaching would silently train against someone else's simulator.
 
 ### Phase 3 — Comfort + scale (~1–2 days, partly optional)
 
-11. **Monitoring — `rsync` out, don't run Python on `login1`.** Measured: **neither
-    `scheduler_status.py` nor TensorBoard can run on `login1` at all.** It only has Python
-    **3.6.8**, which cannot even parse `from __future__ import annotations`
-    (`SyntaxError: future feature annotations is not defined`), and the 3.12 module Python
-    doesn't run there either (glibc 2.17, §0.5 trap 4). So:
+11. **Monitoring — ✅ use `login2`, not `login1`.** Measured 2026-08-06: **`login1` is the only
+    CentOS 7 login node.** `login2`/`login4` are Rocky Linux 8.10 and `login3` is 8.8, all with
+    **glibc 2.28** — the same as the compute nodes. So on `login2` the `Python/3.12.3` module and
+    the venv both work, and **both tools run directly**: verified `scheduler_status.py --help` and
+    TensorBoard 2.21.0 serving a real run's event file (HTTP 200 in 2 s, scalars API returned the
+    actual `custom/avg_*` tags).
+
+    Reaching them, per the sysadmin's `how_to_start`: *"Access with SSH password is not enabled on
+    the nodes login[2-4]... Login with a password is allowed only on login1."* So login2–4 are
+    **key-only, not restricted** — the wiki's own examples use `user@login2:~$` as the ordinary
+    working prompt. Two ways in:
+    - **Hop from login1**, which works with no setup: Warewulf provisions a per-user
+      `~/.ssh/cluster` key (registered in your own `authorized_keys`) on the shared NFS home for
+      exactly this, and sets `StrictHostKeyChecking=no` for `Host *`.
+    - **Direct from the laptop**, which needs your key *offered* — `ssh-add ~/.ssh/id_ed25519`
+      first, or an `IdentityFile` line for `login[2-4]` in your local `~/.ssh/config`. Without an
+      agent it fails with `Permission denied (publickey)`, which looks like a permissions problem
+      and is really just an unoffered key.
+
+    ```bash
+    ssh -N -L 6006:localhost:6006 -J musilto8@login1.rci.cvut.cz musilto8@login2.rci.cvut.cz
+    # on login2:  . ~/rci_env.sh && ratsim_activate && cd $RATSIM_GIT_DIR/ratsim_experiments && ./tensorboard.sh
+    ```
+
+    **Don't leave TensorBoard up for days** — a login node is shared, and a persistent web server
+    is the sort of thing an admin notices. For always-on monitoring prefer the rsync route below.
+
+    On `login1` specifically, neither tool runs at all: Python 3.6.8 there cannot even parse
+    `from __future__ import annotations` (`SyntaxError: future feature annotations is not
+    defined`), and the 3.12 module Python needs glibc 2.28 (§0.5 trap 4). Alternatives that work
+    from anywhere:
     - **Live progress:** `ssh rci 'tail -f /mnt/personal/$USER/logs/train-<jobid>.out'`. Pure file
       reading, no Python, no allocation — and SB3's table already prints `fps` / `rollout_fps`.
     - **TensorBoard / plots / `scheduler_status`:** pull the results to the laptop and run them
