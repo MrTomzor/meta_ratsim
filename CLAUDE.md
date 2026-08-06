@@ -132,6 +132,7 @@ A desktop viewer (VNC/xrdp/GDM) on the same box coexists with `:99` — each use
 | Method | Best device | Why |
 |---|---|---|
 | PPO (small MLP, `n_envs=1`) | **CPU** | GPU transfer per step > forward-pass savings. Laptop CPU beats cloud GPU on same model. Pass `device="cpu"` to the SB3 `PPO(...)` constructor. |
+| RecurrentPPO (LSTM) | **either, ~tied** | Out of the box, the optimization phase is dominated by kernel-launch overhead from a per-timestep Python loop in upstream `sb3_contrib._process_sequence` — so GPU and CPU run at roughly the same speed. `train.py` auto-applies `lstm_fastpath.py` to fix this; afterwards GPU pulls ahead in the usual ways. See `ratsim_experiments/CLAUDE.md` for the full RecurrentPPO setup, presets, and timing knobs. |
 | DreamerV3 | **GPU** | World model + actor-critic are large enough to amortize transfer. ~1.7x on `fps/train`, ~1.6x on `fps/policy`. Override via `method.jax.platform=cuda` (default in `train_dreamerv3.py:173` is `cpu`). |
 
 `fps/policy` in Dreamer logs is the env step rate — capped by Unity single-env stepping regardless of GPU. `fps/train` is world-model update throughput.
