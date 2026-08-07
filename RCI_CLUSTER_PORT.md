@@ -7,12 +7,23 @@ Handoff doc for running ratsim training on the **RCI cluster** (`login[1-4].rci.
 a SLURM-scheduled HPC cluster at CTU. Written after reading the cluster's
 `how_to_start` wiki page and auditing our stack against it.
 
-**Where things stand (2026-08-06 end of day):** Phases 0–2 complete. Install, headless Unity,
-single training, concurrent trainings and the scheduler all run on the cluster. **Two decisions are
-waiting on the user, both flagged 🔲:** pin `n_envs` across machines before generating paper curves
-(§0.8), and pick how to scale dreamer past one GPU (before phase 3). **Untested gaps:** `n_envs>1`
-in a job, 4-way concurrent packing (only 2 verified), any laptop dreamer baseline, and whether
-`OMP_NUM_THREADS=4` suits dreamer at all.
+**Where things stand (2026-08-07):** Phases 0–2 complete. Install, headless Unity, single training,
+concurrent trainings and the scheduler all run on the cluster.
+
+**Both design decisions are now made** (2026-08-07) and neither is implemented yet — these are the
+next two pieces of work:
+1. **`n_envs` moves out of the machine config onto the method / experiment def**, same value on
+   every machine, machine configs keep capacity only (§0.8). Sub-question still open: *which* value
+   to pin, recoverable from what existing plotted runs used.
+2. **Dreamer scales via N GPUs in one job, one scheduler** — needs a `GpuAllocator` mirroring
+   `PortAllocator` to export `CUDA_VISIBLE_DEVICES` per child (before phase 3).
+
+Account resource ceilings are in **§0.55** — planning limits only; **do not launch anything large
+without asking the user first.**
+
+**Untested gaps:** `n_envs>1` in a job, 4-way concurrent packing (only 2 verified), any laptop
+dreamer baseline, GPUs-per-node on `gpu`/`gpulong`, and whether `OMP_NUM_THREADS=4` suits dreamer
+at all.
 
 **Epistemic status:** every claim about *our code* below was verified by reading the
 source (file:line given). **§1 was verified empirically on the laptop (2026-08-06), and
@@ -76,6 +87,42 @@ hardware per partition.
 
 **Nodes are heterogeneous**: the above is one `gpufast` node. Re-run the probe on `gpu` /
 `gpulong` before trusting driver and GPU model there.
+
+### 0.55 Account resource limits — the ceiling we are allowed to ask for
+
+From RCI's web interface (user-reported 2026-08-07). **These are per-user aggregate caps across all
+of your simultaneously running jobs in that partition group — not per-job limits.**
+
+| Partition group | Max jobs | Max CPUs | Max Mem | Max GPUs |
+|---|---|---|---|---|
+| `cpufast`, `gpufast`, `amdfast`, `amdgpufast` (4 h) | 500 | **700** | 6 | **8** |
+| `cpu`, `gpu`, `amd`, `amdgpu` (1 day) | 400 | 200 | 3 | **8** |
+| `cpulong`, `gpulong`, `amdlong`, `amdgpulong` (3 days) | 300 | 200 | 4 | **6** |
+| `cpuextralong`, `gpuextralong`, … (21 days) | 500 | 200 | 3 | **8** |
+
+Memory came through as a bare number; 6/3/4/3 next to 700/200 CPUs reads as **TB**, but it is not
+worth relying on — every job here requests tens of GB, three orders of magnitude below the cap.
+
+> ⚠️ **Treat this table as a ceiling for *planning*, never as a target.** The user's standing rule:
+> **do not launch anything large without asking first.** The cluster is shared and monitored, and
+> these numbers are what the account *may* consume, not what it is polite to consume. Probe and
+> smoke-test jobs stay small and on the `*fast` partitions.
+
+What actually binds, per method:
+
+- **Dreamer and recurrent_ppo need 1 GPU each**, so the GPU column is the real limit on concurrency:
+  **at most 8** concurrent GPU runs (fast / 1-day) or **6** (3-day). CPUs and memory are nowhere
+  near binding for these.
+- **Plain PPO is CPU-only here** (`method.device: cpu`, §0.6), so it is bounded by the CPU column:
+  200 CPUs ÷ 4 `cpu_slot` per run ≈ **50 concurrent PPO runs** outside the fast group. That is far
+  more than any experiment needs; the practical limit becomes disk and the scheduler process.
+- The fast group's 700 CPUs is the generous one, but **4 h wall-clock** makes it a smoke-test
+  partition only — one 1M-step dreamer run alone is ~4.1 h (§0.7).
+
+⚠️ **The GPU cap is not the same as GPUs-per-job.** A single SLURM job's `--gres=gpu:N` must be
+satisfied *on one node*, so the per-job ceiling is the node's GPU count, which we have **not
+measured**. One command settles it before committing to the multi-GPU design:
+`sinfo -p gpu,gpulong -o '%P %G %N'`.
 
 ### Three things from the sysadmin's `how_to_start` worth obeying
 
@@ -463,11 +510,43 @@ This is by design, and the design is in tension with what you want. `scheduler/c
 not 'what's the experiment about' question"*. That is right for throughput and wrong for
 cross-machine curves.
 
-> **🔲 OPEN DECISION (needs the user).** Pin `n_envs` to one value across every machine config used
-> for paper runs. Which value depends on what the existing published/plotted curves used — if
-> those came from `default.yaml` on the laptop, that is **4**, and `rci.yaml` should be changed to
-> match. Nothing measured so far is affected: every timing run in this doc used `train.py`'s own
-> default of `n_envs=1` and wrote only to throwaway dirs.
+**Note this predates the cluster port.** `n_envs` has been a `MethodProfile` field since scheduler
+V1 (`1076e14`); `default.yaml` and `gpu_example.yaml` already disagreed with each other. Adding
+`rci.yaml` as the third machine is what made the consequence visible.
+
+There is direct evidence the placement drifts. `gpu_example.yaml`'s own comment block says
+*"recurrent_ppo stays at 1"* and *"PPO and dreamer both vectorize to 4 envs"*, while the values
+beneath it are **8, 8 and 1**. Nothing ties a machine file to the experiment it will run, so its
+prose rots independently of its values — and a silently wrong `n_envs` produces a plausible curve,
+not an error.
+
+#### ✅ DECIDED (user, 2026-08-07) — `n_envs` moves to the method / experiment def
+
+Same value on every machine. The split:
+
+- **The experiment def owns `n_envs`**, per method — versioned with the experiment, identical
+  everywhere it runs.
+- **The machine config owns capacity only** (`needs.cpu_slot`, `resources`). A box that cannot
+  afford the def's `n_envs` runs **fewer concurrent runs**, not different envs. Deliberately *no*
+  per-machine override: an override reintroduces exactly the hazard being removed, and a paper run
+  must not be able to silently pick up a different rollout size.
+- `n_envs` stays in `RESERVED_ARGS` — the scheduler still owns the CLI flag, it just sources the
+  value from the def instead of the profile.
+- Keep the existing `n_envs > 10` rejection (`PortAllocator` window is 10), and **add** a validation
+  warning when a run's granted `cpu_slot` is below its `n_envs`, since each Unity env is roughly a
+  core. On `rci.yaml` (`cpu_slot: 4`) any `n_envs > 4` should warn.
+
+🔲 **Still open: which value.** It is recoverable rather than a guess — the scheduler passes
+`n_envs=<n>` on the dispatched command line (`scheduler/scheduler.py:559`), so the value each
+existing plotted run used is in its run dir. Check that before pinning, since `default.yaml`=4 and
+`gpu_example.yaml`=8 means the existing results may already be inconsistent with **each other**.
+
+Dreamer is the one method with a non-fairness reason to sit at **1**: at `n_envs=1` the known
+~6–8 KB/env-step leak fills at base rate, giving the longest uptime before the 30 GB RAM-kill and
+re-dispatch. That reason is machine-independent, so pinning dreamer at 1 in the def is consistent.
+
+Nothing measured in this document is affected: every timing run used `train.py`'s own default of
+`n_envs=1` and wrote only to throwaway dirs.
 
 Secondary, same family: `step_multiplier`, `total_steps`, `n_stages` and `metaseed` all come from
 the experiment def rather than the machine config, so those are already machine-independent.
@@ -1026,7 +1105,15 @@ Also fixed here: the scheduler ignores `--use-port-9000` under SLURM, and `alloc
 never reuses :9000 there. On a shared node an open :9000 is far more likely to be a stranger's
 process than your Editor, and attaching would silently train against someone else's simulator.
 
-### 🔲 OPEN DECISION — scaling dreamer beyond one GPU (user to choose)
+### ✅ DECIDED — scaling dreamer beyond one GPU: **Option 1** (user, 2026-08-07)
+
+**One job holding N GPUs, one scheduler inside it.** Chosen to keep the scheduler orchestrating:
+its BFS-based stage selection and run prioritisation are the point of having it, and Option 2 would
+throw them away. **Next action: build the `GpuAllocator` described below.** Two things to settle
+first — the per-node GPU count (`sinfo -p gpu,gpulong -o '%P %G %N'`; the account's 6–8 GPU cap in
+§0.55 is an *aggregate* limit, not a per-job one), and the `--mem` figure once N is known.
+
+The three options, kept for the reasoning:
 
 Today `dreamer` declares `needs.gpu: 1` against `resources.gpu: 1`, so **exactly one dreamer run
 at a time**, no matter how many cores are free. At ~4.1 h per 1M steps (§0.7) that is the binding
