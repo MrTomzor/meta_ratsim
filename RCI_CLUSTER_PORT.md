@@ -186,8 +186,34 @@ both smokes exited 0 — but it eats into short runs.
 | CPU node | `n01-20`: 46 threads → **2 PPO runs** | `a01-16`: **126 threads, 1 TB → 7 PPO runs** |
 | GPU node | `n21-32`: 4× V100 32GB, sm_70, **emulated** bf16 | `g01-10`: 4× A100 40GB · `g11-12`: **8× A100**, sm_80, **native** bf16 |
 
-Early signal, not yet a clean benchmark: the A2 smoke reached **fps 576 on 8 AMD threads**, against
-**251 on 8 Intel threads** in §0.9. Different step counts, so treat it as directional until B1.
+#### AMD vs Intel, measured properly (job 11318011, `a05`, 16 threads, same 20k run)
+
+| | | Intel `n02` | AMD `a05` | |
+|---|---|---|---|---|
+| **`n_envs=1`** | overall fps | 360 | **487** | +35% |
+| | `rollout_fps` (env stepping) | 482 | **629** | **+30%** |
+| | `opt_seconds` (training) | 1.29 | **0.801** | **1.6× faster** |
+| **`n_envs=4`** | overall fps | 688 | **723** | +5% |
+| | `rollout_fps` | 999 | 967 | **−3%, tied** |
+| | `opt_seconds` | 4.29 | **3.52** | **1.2× faster** |
+
+**Training compute is faster on AMD in both cases** (Zen 3 IPC on PPO's small CPU matmuls).
+**Env stepping is faster only at `n_envs=1`.** At `n_envs=4` the two architectures land within 3% of
+each other at ~1000 `rollout_fps` — two very different CPUs hitting the same number is the tell:
+
+> ⚠️ **At `n_envs=4` on 16 threads the rollout is bounded by our single-threaded Python side**
+> (obs assembly, TCP connector, VecEnv stepping), not by Unity or the CPU. ~1000 env-steps/s is a
+> ceiling **in our code**, and it is now the binding constraint on PPO throughput. Worth profiling
+> before buying more hardware to push against it.
+
+❌ **Discount the A2 smoke's "fps 576 on 8 AMD threads vs 251 on 8 Intel threads".** That was at
+8 threads, where Intel sits *below* the cores-per-env threshold (§0.9) and AMD does not — it
+measured the cliff, not raw speed. At 16 threads, above the threshold on both, the gap collapses
+from 2.3× to 5%.
+
+**So the case for AMD is capacity, not speed.** At our actual `n_envs=4`, a single run gains ~5%,
+which is noise. The reason to move is **126 usable threads against 46 → 7 concurrent runs per job
+instead of 2**, plus native bf16 and 8 GPUs/node on `g[11-12]` for dreamer.
 
 #### The bottleneck claim this overturns
 
