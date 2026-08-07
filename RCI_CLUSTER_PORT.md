@@ -805,9 +805,70 @@ Going wider means several jobs, each with its own scheduler — the Option-2 tra
 parallelism, bookkeeping split across schedulers). The `cpu` partition's 200-CPU aggregate cap
 allows roughly 4 such jobs, i.e. ~12 concurrent PPO runs.
 
-⚠️ **[VERIFY] 3 runs × 16 cores in a 48-core job has not been run.** It follows from "concurrent
-runs do not interfere when each has enough cores", but that was verified at 2 runs × 4 cores
-(phase 2), not 3 × 16. One job would settle it.
+#### ✅ 7-wide PPO on one AMD node — verified (job 11318081, `a10`, 112 threads)
+
+7 seeds × 100k steps, `n_envs=4`, one scheduler, one job. **7/7 completed, no retries, no errors.**
+
+| seed | fps | rollout_fps | opt_seconds |
+|---|---|---|---|
+| 0 | 593 | 962 | 3.98 |
+| 1 | 625 | 898 | 4.40 |
+| 2 | 604 | 1030 | 3.77 |
+| 3 | 607 | 1170 | 3.38 |
+| 4 | 603 | 1230 | 3.35 |
+| 5 | 607 | 931 | 4.08 |
+| 6 | 614 | 1040 | 3.99 |
+| **aggregate** | **4253** | | |
+
+Each run holds **~608 fps against 723 solo (84%)**, so packing costs 16%. Against the laptop's
+single-run **581**, that is **7.3×** by the fps metric, or **4.8×** by wall clock (700k steps in
+251 s, startup included).
+
+Two things this settles:
+- **`opt_seconds` is unchanged under packing** (3.35–4.40 vs 3.52 solo), so the training phase does
+  not degrade; the 16% is rollout and startup contention.
+- **Each run still reaches ~1000 `rollout_fps` even 7-wide.** Seven processes each hitting the same
+  ceiling independently confirms it is *per-process* Python overhead, not a shared node resource.
+
+### 0.95 🔥 The thread-count trap, one layer below OMP — Unity spawns 266 threads per instance
+
+**B2 failed twice before it worked, and neither failure was CPU, memory, or a slow boot.**
+
+```
+start_ratsim_headless.sh: fork: Resource temporarily unavailable
+```
+
+`EAGAIN` on `fork` — a **task-count limit**. Measured directly (job 11318080, `a01`):
+
+| | |
+|---|---|
+| `ulimit -u` soft | **4096** ← the wall |
+| `ulimit -u` hard | 4127387 |
+| **threads per Unity instance** | **266**, exactly, every time |
+| max instances under the soft limit | **15** (14 = 3728 tasks; 16 would exceed 4096) |
+
+7 runs × 4 envs = 28 instances = **7448 threads** against a 4096 limit. It could never have worked,
+and the mode of failure was misleading: the first attempt surfaced as
+`subprocess.TimeoutExpired`, which sent this investigation after a boot-timeout red herring.
+Boots were never slow — the fixed run logs `TCP server up on port 9440 after 1s` under full load.
+
+**Fix: raise the soft limit in the job.** `ulimit -u 32768`. The hard limit is 4.1M, so this needs
+no privileges — `RLIMIT_NPROC` is a fork-bomb guard, not a policy quota, and SLURM cgroups still
+bound CPU and memory. ⚠️ **It is per-user per-node, not per-job**, so two of your jobs on one node
+share the budget and each must raise it. Belongs in `rci_env.sh`, not in individual scripts.
+
+> 🔎 **[VERIFY] 266 threads per instance is Unity sizing its job-worker pool from the node's 128
+> CPUs, not from our cgroup allocation — the exact shape of the `OMP_NUM_THREADS` trap (§0.6), one
+> layer down.** At `n_envs=4` on 16 allocated threads that is **1064 Unity threads on 16 CPUs**.
+> This is a strong candidate for *causing* the cores-per-env cliff in §0.9. Unity accepts
+> `-job-worker-count N`; capping it could cut threads by an order of magnitude and reduce
+> contention. **If that pans out, several numbers in this document improve** — the packing limit,
+> the cliff, and possibly the per-run fps. Worth testing before any further capacity work.
+
+Also fixed while chasing this: the Unity boot wait was hardcoded to 30 s in **two** places that must
+agree — the shell loop in `start_ratsim_headless.sh` and `_spawn_via_script`'s `timeout_s`. If the
+Python one is shorter it kills the script mid-wait and a timeout reads as a crash. Both now read
+**`RATSIM_BOOT_TIMEOUT`**, defaulting to 30 so laptop and single-run behaviour are unchanged.
 
 #### The throughput price of comparable curves
 
