@@ -643,14 +643,22 @@ Same question, 10k steps, **16 cores + 1 V100** (so above the threshold), `n21`/
 | `n_envs=1` | 198 s | 2742 MB |
 | `n_envs=4` | **187 s** | 2483 MB |
 
-**~6%, against PPO's 1.9× at the same core count.** This is `train_ratio` (§0.7) seen from the
-other side: dreamer replays 32 timesteps per env step, so the world-model update dominates and
-collecting experience faster barely moves the total. It is the same fact as `fps/train 2039` vs
+**~6% on wall clock, against PPO's 1.9× at the same core count.** This is `train_ratio` (§0.7) seen
+from the other side: dreamer replays 32 timesteps per env step, so the world-model update dominates
+and collecting experience faster barely moves the total. It is the same fact as `fps/train 2039` vs
 `fps/policy 67`.
 
-So **dreamer pays the four-Unity cost of `n_envs=4` and gets almost nothing back.** Pin it at 4
-anyway for comparability with the existing runs (§0.8) — but when sizing a job, dreamer is cheap in
-cores relative to PPO, which is what makes 4 dreamers × 18 cores on one GPU node comfortable.
+> ⚠️ **This is a throughput result and nothing else. `n_envs` still changes what dreamer learns.**
+> With 4 envs the replay buffer is filled from 4 independent episodes concurrently, so it holds more
+> decorrelated trajectories and sampled batches are less correlated — a real difference in what the
+> world model sees, invisible in any wall-clock number. Do not read "6%" as "n_envs doesn't matter
+> for dreamer"; it makes pinning at 4 **more** important for dreamer, not less, because dreamer is
+> the case where you pay the cost and get *only* the learning effect.
+
+Sizing consequence, and it is the opposite of the tempting one: because dreamer gets no throughput
+back, it must **still be given 16–18 cores** so its 4 envs are not starved. At 8 cores `n_envs=4`
+measured *slower* than `n_envs=1` (228 s vs 203 s) — under-provisioning costs speed while the
+learning difference persists. Four dreamers × 18 cores on one GPU node is the right shape.
 
 Also measured: **peak RSS is only ~2.7 GB** for a 10k-step run, so the leak does not show at this
 length and `--mem=48G` was wild overkill. The 30 GB `max_ram_gb` threshold is for long runs, not a
