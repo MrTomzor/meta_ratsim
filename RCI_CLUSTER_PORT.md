@@ -13,17 +13,19 @@ concurrent trainings and the scheduler all run on the cluster.
 **Both design decisions are now made** (2026-08-07) and neither is implemented yet — these are the
 next two pieces of work:
 1. **`n_envs` moves out of the machine config onto the method / experiment def**, same value on
-   every machine, machine configs keep capacity only (§0.8). Sub-question still open: *which* value
-   to pin, recoverable from what existing plotted runs used.
+   every machine, machine configs keep capacity only (§0.8). **The value is `4`**, read off the
+   existing runs. **`machines/rci.yaml` must be re-sized in the same change** — at `n_envs=4` a run
+   needs ~16 cores, and leaving `needs.cpu_slot: 4` gives the worst configuration measured (§0.9).
 2. **Dreamer scales via N GPUs in one job, one scheduler** — needs a `GpuAllocator` mirroring
-   `PortAllocator` to export `CUDA_VISIBLE_DEVICES` per child (before phase 3).
+   `PortAllocator` to export `CUDA_VISIBLE_DEVICES` per child (before phase 3). A whole GPU node
+   (72 cores, 4× V100) is exactly 4 runs × 18 cores, which is also the fair-share ratio.
 
-Account resource ceilings are in **§0.55** — planning limits only; **do not launch anything large
-without asking the user first.**
+Account resource ceilings and node topology are in **§0.55** — planning limits only; **do not
+launch anything large without asking the user first.** Stay on the V100 partitions; the `h200*`
+nodes are wrong for a simulator-bound workload.
 
-**Untested gaps:** `n_envs>1` in a job, 4-way concurrent packing (only 2 verified), any laptop
-dreamer baseline, GPUs-per-node on `gpu`/`gpulong`, and whether `OMP_NUM_THREADS=4` suits dreamer
-at all.
+**Untested gaps:** whether the ~4-cores-per-env threshold (§0.9) holds for dreamer as it does for
+PPO, `n_envs=4` beyond 16 cores, and any laptop dreamer baseline.
 
 **Epistemic status:** every claim about *our code* below was verified by reading the
 source (file:line given). **§1 was verified empirically on the laptop (2026-08-06), and
@@ -99,6 +101,29 @@ of your simultaneously running jobs in that partition group — not per-job limi
 | `cpu`, `gpu`, `amd`, `amdgpu` (1 day) | 400 | 200 | 3 | **8** |
 | `cpulong`, `gpulong`, `amdlong`, `amdgpulong` (3 days) | 300 | 200 | 4 | **6** |
 | `cpuextralong`, `gpuextralong`, … (21 days) | 500 | 200 | 3 | **8** |
+
+#### Node topology, and the accelerators we deliberately do not use (measured 2026-08-07)
+
+`sinfo -o '%20P %6D %24G %N'`:
+
+| Partition family | Nodes | GRES |
+|---|---|---|
+| `cpu*` | `n[01-20,33]` | — |
+| `gpu*` (`gpufast`/`gpu`/`gpulong`/`gpuextralong`) | `n[21-32]` | **`gpu:v100:4`** |
+| `amd*` | `a[01-16]` | — |
+| `amdgpu*` | `g[01-12]` | `gpu:a100:4` (`g[11-12]`: `a100:8`) |
+| **`h200*`** | `h[01-03]` | **`gpu:nvidia_h200_nvl:8`** |
+| `ipu` | `ipu01` | `ipu:1` |
+
+**A GPU node is 72 CPUs, 384 GB and 4× V100 — so the proportionate ask is 18 cores per GPU.**
+This is the number that should size any multi-GPU job: 1 GPU → ~18 cores, 4 GPUs → the whole node
+at 72. Taking 32 cores with a single GPU would strand two GPUs nobody else can then schedule.
+
+> 🚫 **Stay on the V100s (`gpu*`, nodes `n21-n32`).** Not just etiquette — this workload cannot use
+> an H200. Dreamer here is **Unity-bound at ~67 env-steps/s** (§0.7), so even the V100 idles between
+> steps. `h200*` and `amdgpu*` have never been used by this project and should not be.
+> Verified 2026-08-07: every node ever allocated to this account is `n01`–`n28`, and the only
+> partitions ever used are `cpufast` and `gpufast`.
 
 Memory came through as a bare number; 6/3/4/3 next to 700/200 CPUs reads as **TB**, but it is not
 worth relying on — every job here requests tens of GB, three orders of magnitude below the cap.
@@ -536,20 +561,151 @@ Same value on every machine. The split:
   warning when a run's granted `cpu_slot` is below its `n_envs`, since each Unity env is roughly a
   core. On `rci.yaml` (`cpu_slot: 4`) any `n_envs > 4` should warn.
 
-🔲 **Still open: which value.** It is recoverable rather than a guess — the scheduler passes
-`n_envs=<n>` on the dispatched command line (`scheduler/scheduler.py:559`), so the value each
-existing plotted run used is in its run dir. Check that before pinning, since `default.yaml`=4 and
-`gpu_example.yaml`=8 means the existing results may already be inconsistent with **each other**.
+#### ✅ The value: **`n_envs = 4`**, read off the existing runs (2026-08-07)
 
-Dreamer is the one method with a non-fairness reason to sit at **1**: at `n_envs=1` the known
-~6–8 KB/env-step leak fills at base rate, giving the longest uptime before the 30 GB RAM-kill and
-re-dispatch. That reason is machine-independent, so pinning dreamer at 1 in the def is consistent.
+Not a guess — the scheduler passes `n_envs=<n>` on the dispatched command line
+(`scheduler/scheduler.py:559`), so every run's `scheduler_logs/stage_*.log` records what it used.
+Scanning `results/experiments/*/runs/*/scheduler_logs/`:
 
-Nothing measured in this document is affected: every timing run used `train.py`'s own default of
-`n_envs=1` and wrote only to throwaway dirs.
+**The whole current wells/ortho line — the paper work — is consistently `n_envs=4`, for both
+methods:**
+
+```
+ortho_wells_adaptive_nohomeprime                  dreamer 4 · ppo 4
+ortho_wells_adaptive_nohomeprime_bl256            dreamer 4
+ortho_wells_adaptive_nohomeprime_dreamer_ladder   dreamer 4
+ortho_wells_adaptive_no_explore_reward            dreamer 4 · ppo 4
+wellmaze_cue_5x5 / wellmaze_cue_test_smol_model   dreamer 4
+```
+
+So pin **4 for every method, including dreamer.** This overrides the "dreamer should sit at 1 for
+leak management" reasoning inherited from `gpu_example.yaml`: the actual dreamer runs all used 4,
+and matching them matters more than slowing the leak, which the 30 GB RAM-kill already handles.
+
+**The older experiments are inconsistent, and one of them is an ablation.** This is the failure
+mode the move fixes, and it has already happened:
+
+```
+gps_ablation_5house:
+  no_gps__dreamer__seed1    stage_0   n_envs=4
+  no_gps__dreamer__seed2    stage_0   n_envs=4
+  with_gps__dreamer__seed0  stage_0   n_envs=4
+  with_gps__dreamer__seed0  stage_10  n_envs=8   <-- changed MID-RUN
+```
+
+One arm switched to 8 partway through while the other stayed at 4, so those two arms are not
+matched. `memory_orthomaze` ppo seed0 shows both 8 and 4, and `wellmaze_test` / `wellmaze_cue_test`
+show 1 and 4 — re-dispatches picking up a machine config that had changed underneath them. A wrong
+`n_envs` produces a plausible curve, never an error.
 
 Secondary, same family: `step_multiplier`, `total_steps`, `n_stages` and `metaseed` all come from
 the experiment def rather than the machine config, so those are already machine-independent.
+
+### 0.9 What `n_envs=4` actually costs — measured 2026-08-07
+
+`n_envs=4` had **never been run inside a SLURM job** before this. It works: four Unity instances,
+four distinct ports from the job's own window (`[9241, 9242, 9243, 9244]`), clean exit. But the
+throughput story reverses depending on how many cores the run has, and one data point is not enough
+to see it.
+
+Identical run throughout — `method=ppo world=maze_default total_steps=20000 n_stages=1`, `OMP=4`:
+
+| | `n_envs=1` | `n_envs=4` | | wall at `n_envs=4` |
+|---|---|---|---|---|
+| cluster, **4 cores** (n13) | 135 | **17** | 8× **loss** | **2037 s** |
+| cluster, **8 cores** (n02) | 369 | 251 | 1.5× loss | 143 s |
+| cluster, **16 cores** (n02) | 360 | **688** | 1.9× **gain** | 76 s |
+| laptop, 16 threads | 685 | 581 | 1.2× loss | 61 s |
+
+**There is a threshold at roughly 4 cores per env.** Below it the vectorized version does not
+degrade gracefully, it collapses: at 4 cores a 20k-step run takes **34 minutes** instead of 76
+seconds, because four Unity processes plus the trainer are fighting over four cores
+(`opt_seconds` 67.1 against 4.29 at 16 cores). Above the threshold, vectorization pays properly.
+Anyone who measures this at one core count will draw the opposite conclusion to anyone who measures
+it at another — the 8-core point alone says "n_envs=4 is slower", and it is wrong.
+
+⚠️ **Node variance is large at low core counts, so don't read these to two significant figures.**
+The same 4-core `n_envs=1` run gave **135 fps on n13** and **175 fps on n06**. `cpufast` nodes are
+shared and the cgroup caps CPUs but not memory bandwidth. The 16-core points are steadier; the
+4-core row is only reliable as "catastrophic".
+
+`opt_seconds` rises ~4–5× everywhere (0.99 → 4.79 at 8 cores, 0.50 → 2.62 on the laptop). That part
+is inherent — the rollout buffer is `n_steps × n_envs`, so each update does 4× the work and there
+are 4× fewer of them. **That is the part that changes the learning curve**, and the whole reason
+the value has to be pinned rather than chosen per box.
+
+#### Dreamer does NOT behave like PPO here
+
+Same question, 10k steps, **16 cores + 1 V100** (so above the threshold), `n21`/`n23`:
+
+| dreamer | wall | peak process-tree RSS |
+|---|---|---|
+| `n_envs=1` | 198 s | 2742 MB |
+| `n_envs=4` | **187 s** | 2483 MB |
+
+**~6%, against PPO's 1.9× at the same core count.** This is `train_ratio` (§0.7) seen from the
+other side: dreamer replays 32 timesteps per env step, so the world-model update dominates and
+collecting experience faster barely moves the total. It is the same fact as `fps/train 2039` vs
+`fps/policy 67`.
+
+So **dreamer pays the four-Unity cost of `n_envs=4` and gets almost nothing back.** Pin it at 4
+anyway for comparability with the existing runs (§0.8) — but when sizing a job, dreamer is cheap in
+cores relative to PPO, which is what makes 4 dreamers × 18 cores on one GPU node comfortable.
+
+Also measured: **peak RSS is only ~2.7 GB** for a 10k-step run, so the leak does not show at this
+length and `--mem=48G` was wild overkill. The 30 GB `max_ram_gb` threshold is for long runs, not a
+sizing guide for short ones.
+
+> **Not captured: `fps/train` / `fps/policy` for this comparison.** dreamerv3 prints only a
+> `Metrics filtered by: 'score|length|fps|ratio|…'` header to stdout and writes the values to
+> `<run>/dreamer_logdir/metrics.jsonl` — which the probe script deleted along with the run dir.
+> Read that jsonl before cleanup next time. Wall time answers the question here (~53 env-steps/s
+> including startup, consistent with the 67 `fps/policy` measured in §0.7), so this did not justify
+> another GPU job.
+
+#### Concurrency: packing runs on top of vectorization does not work
+
+Same 4-run PPO def, one 16-core allocation, scheduler dispatching:
+
+| packing | cores per run | wall for all 4 runs |
+|---|---|---|
+| **2-wide** | 8 | **339 s** |
+| **4-wide** | 4 | **1265 s** (3.7× worse) |
+| (1 run at a time, 16 cores, from the table above) | 16 | ~304 s |
+
+4-wide puts 16 Unity instances on 16 cores — precisely the starved regime. And 2-wide is no better
+than running them sequentially with all 16 cores. **At `n_envs=4`, vectorization has already
+consumed the parallelism; concurrent runs on the same cores buy nothing.**
+
+#### The throughput price of comparable curves
+
+The old sizing (`n_envs=1`, 4-wide, `cpu_slot: 16` / `needs.cpu_slot: 4`) reached ~1700 fps
+aggregate on 16 cores. `n_envs=4` on the same 16 cores gives **688**. So pinning at 4 costs roughly
+**2.5× aggregate throughput** unless the allocation grows with it. That is the real price of
+cross-machine comparability, and it is worth paying knowingly rather than discovering later.
+
+The fix is cores, not concurrency. With `n_envs=4`:
+- **one PPO run wants ~16 cores**, so 4 concurrent runs want ~64. `cpufast` allows 700 CPUs, so
+  that is an easy ask for CPU-only PPO.
+- **a whole GPU node is 72 cores + 4 V100** = 4 dreamer runs at 18 cores each. That is exactly the
+  fair-share ratio *and* exactly the Option-1 multi-GPU job shape. The pieces line up.
+
+⚠️ `machines/rci.yaml` is still sized for the old world (`cpu_slot: 16`, `needs.cpu_slot: 4`,
+`n_envs: 1`). Leaving `needs.cpu_slot: 4` while moving to `n_envs=4` produces the 4-wide case
+above — the worst configuration measured. **Re-size it in the same change that pins `n_envs`.**
+
+#### A harness trap worth recording: shared `run_folder` across jobs
+
+Two copies of the sweep submitted together (`11317603`, `11317604`) both used
+`run_folder=_tmp_nenvs_<n>`. `results/` is on shared storage, so the faster job's cleanup
+`rm -rf`'d the slower job's tensorboard directory mid-run and killed both its legs with
+`FileNotFoundError` on `events.out.tfevents...`. Different nodes, so no CPU interference and the
+throughput numbers survived, but the runs were scrapped and re-run.
+
+**Same shape as the port-collision bug of phase 2, one layer up:** anything derived from a name
+rather than from `$SLURM_JOB_ID` collides as soon as two jobs run at once. `run_folder` now
+includes `$SLURM_JOB_ID` in `nenvs_perf.sbatch`. Real experiments are not exposed — the scheduler
+derives per-run folders from the experiment and run id — but any ad-hoc probe script is.
 
 ---
 
