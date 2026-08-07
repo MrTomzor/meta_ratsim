@@ -21,8 +21,13 @@ next two pieces of work:
    (72 cores, 4× V100) is exactly 4 runs × 18 cores, which is also the fair-share ratio.
 
 Account resource ceilings and node topology are in **§0.55** — planning limits only; **do not
-launch anything large without asking the user first.** Stay on the V100 partitions; the `h200*`
-nodes are wrong for a simulator-bound workload.
+launch anything large without asking the user first.**
+
+⚠️ **Read §0.56 before planning anything.** The wiki scrape overturned several assumptions:
+a SLURM "CPU" is a **thread** not a core; max allocatable per node is 46/70/126/252, not the node's
+full count; the admins explicitly recommend the **AMD nodes**, which we had never used; the
+Intel-built venvs **already run there unmodified** (verified on an A100); and the claim that dreamer
+is simulator-bound is **false** — it is training-bound, which is the actual argument for A100.
 
 **Untested gaps:** whether the ~4-cores-per-env threshold (§0.9) holds for dreamer as it does for
 PPO, `n_envs=4` beyond 16 cores, and any laptop dreamer baseline.
@@ -119,11 +124,81 @@ of your simultaneously running jobs in that partition group — not per-job limi
 This is the number that should size any multi-GPU job: 1 GPU → ~18 cores, 4 GPUs → the whole node
 at 72. Taking 32 cores with a single GPU would strand two GPUs nobody else can then schedule.
 
-> 🚫 **Stay on the V100s (`gpu*`, nodes `n21-n32`).** Not just etiquette — this workload cannot use
-> an H200. Dreamer here is **Unity-bound at ~67 env-steps/s** (§0.7), so even the V100 idles between
-> steps. `h200*` and `amdgpu*` have never been used by this project and should not be.
-> Verified 2026-08-07: every node ever allocated to this account is `n01`–`n28`, and the only
-> partitions ever used are `cpufast` and `gpufast`.
+> 🚫 **Stay off the `h200*` partitions** (`h[01-03]`, 8× H200 141GB). The admin rule is to use them
+> only at high utilisation, and one dreamer world model will not saturate one. **This is *not*
+> because the sim is the bottleneck** — an earlier version of this doc said dreamer was
+> "Unity-bound at ~67 env-steps/s" and that is **wrong**, see §0.56.
+>
+> ✅ **`amdgpu*` (A100) is a different matter and is now the recommended target** — see §0.56.
+
+### 0.56 ⚠️ The AMD subcluster — the biggest thing this port got wrong
+
+Read after the wiki scrape (`ratsim_experiments/docs/rci_wiki/`) and the 2022 tutorial. The admin's
+own recommendation slide says, verbatim: **"Use much faster AMD nodes."** Phases 0–2 used only the
+2019 Intel hardware.
+
+#### First, three corrections to numbers used throughout this document
+
+1. **A SLURM "CPU" is a *thread*, not a core.** Intel CPU nodes are 24c/48t, Intel GPU nodes 36c/72t,
+   AMD CPU nodes 64c/128t. So `--cpus-per-task=16` is **8 physical cores**, and the
+   "~4 cores per env" threshold of §0.9 is really **~4 threads = 2 physical cores per env**. The
+   measurements are unaffected; the vocabulary was wrong.
+2. **Max allocatable per node is less than the node has**: **46** on Intel CPU nodes, **70** on Intel
+   GPU nodes, **126** on AMD CPU nodes, **124** on `g[01-10]`, **252** on `g[11-12]`, **382** on n33.
+   A planned `--cpus-per-task=48` would never have scheduled. On Intel that caps a CPU node at
+   **2** PPO runs at 16 threads, not the 3 claimed earlier.
+3. `--cpus-per-task` **should be even** (cores are allocated whole), and `--nodes=1` should be set
+   explicitly even for single-node jobs — both are in the tutorial's recommendations.
+
+#### What was measured on AMD (2026-08-07, jobs 11317999 / 11318000)
+
+**A1 on `a07` (`amdfast`) — everything works, and the module story is simpler than the wiki says.**
+The wiki states Intel and AMD use different module trees. **For our stack they do not.**
+`Python/3.12.3-GCCcore-13.3.0`, `Xvfb/21.1.14-GCCcore-13.3.0` and `git/2.45.1-GCCcore-13.3.0` all
+load on AMD from the *identical* `/mnt/appl/software/...` paths, with the same
+`MODULEPATH=/opt/ohpc/pub/modulefiles` and the same Lmod bootstrap. Rocky 8.9, **glibc 2.28 — same
+as the Intel compute nodes.** Unity booted under xvfb in **1 s**. The missing-`ss`-without-`/sbin`
+trap is identical. **`rci_env.sh` needs no AMD-specific changes.**
+
+**A2 on `g05` (`amdgpufast`, A100-SXM4-40GB) — the Intel-built venvs run unmodified.**
+
+| | result |
+|---|---|
+| SB3 venv on AMD | ✅ all imports; torch 2.13.0+cu126 sees the A100 at **cc 8.0**, `is_bf16_supported()` True |
+| Dreamer venv on AMD | ✅ jax 0.4.33 → `[CudaDevice(id=0)]` |
+| jax matmul 4096³ | **bf16 0.7 ms vs fp32 1.3 ms** — native bf16 on sm_80, unlike the V100 |
+| PPO end-to-end | ✅ exit 0, 4 Unity envs |
+| Dreamer end-to-end | ✅ exit 0, stage completed |
+
+**So there is no second venv to build.** Every wheel is generic manylinux x86-64 and the interpreter
+path is shared, so one venv serves both subclusters. This also retroactively justifies pip-over-
+modules: module builds are architecture-specific and would *not* have been portable this way.
+
+⚠️ **The AMD GPU nodes run an OLDER driver**: `550.54.14` (CUDA 12.4) against `575.51.03` (12.9) on
+the Intel GPU nodes. JAX warns that its PTX compiler (12.9.86) is newer than the driver and
+therefore **disables parallel compilation**, so JIT warm-up is slower. Not a correctness problem —
+both smokes exited 0 — but it eats into short runs.
+
+#### Why this changes the plan
+
+| | Intel (phases 0–2) | AMD |
+|---|---|---|
+| CPU node | `n01-20`: 46 threads → **2 PPO runs** | `a01-16`: **126 threads, 1 TB → 7 PPO runs** |
+| GPU node | `n21-32`: 4× V100 32GB, sm_70, **emulated** bf16 | `g01-10`: 4× A100 40GB · `g11-12`: **8× A100**, sm_80, **native** bf16 |
+
+Early signal, not yet a clean benchmark: the A2 smoke reached **fps 576 on 8 AMD threads**, against
+**251 on 8 Intel threads** in §0.9. Different step counts, so treat it as directional until B1.
+
+#### The bottleneck claim this overturns
+
+This doc previously said dreamer is *"Unity-bound at ~67 env-steps/s"*. **That is false**, and §0.9's
+own data disproves it: PPO drives the *same* 4 Unity envs on the *same* 16 threads at **688**
+env-steps/s, while dreamer manages ~53. The simulator can go 13× faster than dreamer uses, and
+`n_envs=4` buying dreamer only 6% is the same fact. **Dreamer is bounded by the training side.**
+
+Consequently a faster GPU plausibly *does* speed dreamer up, which is the real argument for A100.
+Whether the binding constraint is GPU compute or JAX/Python overhead is **[VERIFY]** — one
+single-run A100-vs-V100 comparison settles it and should come before any multi-GPU work.
 
 Memory came through as a bare number; 6/3/4/3 next to 700/200 CPUs reads as **TB**, but it is not
 worth relying on — every job here requests tens of GB, three orders of magnitude below the cap.
