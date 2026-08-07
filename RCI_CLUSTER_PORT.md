@@ -683,7 +683,30 @@ Same 4-run PPO def, one 16-core allocation, scheduler dispatching:
 
 4-wide puts 16 Unity instances on 16 cores — precisely the starved regime. And 2-wide is no better
 than running them sequentially with all 16 cores. **At `n_envs=4`, vectorization has already
-consumed the parallelism; concurrent runs on the same cores buy nothing.**
+consumed the parallelism; concurrent runs on the same cores buy nothing.** Concurrency only pays
+once the *allocation* grows, which is the next point.
+
+#### One scheduler job = one node, and that sets the concurrency ceiling
+
+The scheduler dispatches runs with plain `subprocess.Popen` (`scheduler/scheduler.py:609`) — no
+`srun` — so every child lands on whichever node the scheduler itself got. A single job therefore
+cannot exceed one node's cores, no matter what `--cpus-per-task` asks for:
+
+| | cores | concurrent runs at ~16–18 cores each |
+|---|---|---|
+| CPU node (`n[01-20,33]`) | 48 | **3 PPO runs** → ~2060 fps aggregate |
+| GPU node (`n[21-32]`) | 72 + 4× V100 | **4 dreamer runs** |
+
+PPO is the comfortable case: it needs no GPU, so it belongs on a plain `cpu` node and strands
+nothing. Three concurrent runs is ~3.5× the laptop's single-run throughput.
+
+Going wider means several jobs, each with its own scheduler — the Option-2 trade-off (more
+parallelism, bookkeeping split across schedulers). The `cpu` partition's 200-CPU aggregate cap
+allows roughly 4 such jobs, i.e. ~12 concurrent PPO runs.
+
+⚠️ **[VERIFY] 3 runs × 16 cores in a 48-core job has not been run.** It follows from "concurrent
+runs do not interfere when each has enough cores", but that was verified at 2 runs × 4 cores
+(phase 2), not 3 × 16. One job would settle it.
 
 #### The throughput price of comparable curves
 
