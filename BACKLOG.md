@@ -36,32 +36,53 @@ So at our operating point — 16 threads per run — capping workers buys approx
 throughput would have to climb from 251 to over 340 just to break even, and past ~600 to be worth
 the complication. Also note `-job-worker-count` was never confirmed to exist on our build.
 
-### ⏸ DEFERRED (2026-08-10) — Profile the ~1000 `rollout_fps` per-process ceiling
+### ✅ ANSWERED (2026-08-10) — the ~1000 `rollout_fps` ceiling is latency, not Python compute
 
-**The idea.** `rollout_fps` saturates near 1000 env-steps/s at `n_envs=4` on both CPU
-architectures, and each of 7 packed runs still hit ~1000 simultaneously — a shared hardware
-bottleneck would have divided. So it is per-process, above the simulator, on our side. Candidates:
-per-step TCP round-trip in the connector, obs assembly/serialization, the gym wrapper stack,
-`SubprocVecEnv` pipe overhead.
+**Profiled on the cluster** (job 11326598, `amdfast`, a07, 16 threads, PPO `n_envs=4`, 30k steps),
+`py-spy --subprocesses` run twice: once sampling on-CPU only, once with `--idle` for wall time.
+Raw stacks kept at `/mnt/personal/musilto8/logs/prof-11326598/`.
 
-**What it would buy.** Rollout is **62% of wall-clock** (from the 7-wide run: `fps=593`,
-`rollout_fps=962` → 1.04 ms/step rollout vs 0.65 ms/step optimize). So:
+**The process is predominantly blocked, not computing.** Every top wall-time frame is a blocking
+call — `multiprocessing/connection.py:_recv` 34.6%, `selectors.py:select` 15.2% (the Unity socket),
+`threading.py:wait` 10.8%. Total on-CPU samples were 12,119 against 55,893 wall samples.
 
-| if rollout gets | overall gain | 18M-step run |
-|---|---|---|
-| 1.5× faster | 1.26× | 8.3 h → 6.6 h |
-| 2× faster | 1.44× | 8.3 h → 5.8 h |
-| free (unreachable) | 2.6× | — |
+**Of the CPU that is used, the biggest single item is our own code:**
 
-Worth having, not transformative. It bounds **per-run wall-clock**, which is what sets iteration
-speed; the 7-wide packing already works around it for *aggregate* throughput across seeds.
+| on-CPU | what |
+|---|---|
+| **~18%** | `task_tracker/exploration_tracker.py:update_from_lidar` + `_bresenham_ray` |
+| ~14% | connector: `flush_send` 10.5%, `read_messages_from_unity` 2.9%, `json.raw_decode` 1.0% |
+| ~8.5% | `SubprocVecEnv` pipe traffic (`_recv` 6.6%, pickle `dumps` 1.9%) |
+| ~6% | torch (the optimize phase) |
 
-**Cost: ~30 min, laptop only, no cluster job.** Attach `py-spy` to a running training. The first
-question to answer is whether the process is *burning* CPU in Python or *idle waiting* on Unity's
-TCP round-trip — those have completely different fixes, and `py-spy` separates them directly.
+`update_from_lidar` is a **per-ray Python loop**: `_bresenham_ray` walks cells in a `for` loop, then
+~8 small numpy ops run on a few-dozen-element array, per ray, per step, per env. Hundreds of tiny
+numpy calls per step, where per-call overhead dominates the arithmetic. Vectorizing across all rays
+at once (one `(n_rays, max_cells, 2)` array instead of a loop) is mechanical and would remove most
+of it. Note it only runs for volumetric-exploration tasks — which is what the current wells/ortho
+paper runs use, so it does apply.
 
-A negative result closes the question usefully: if it's idle-waiting on Unity, ~1000 steps/s per
-env is simply what the simulator does and we stop thinking about it.
+**But fixing it does not buy the 1.4×.** Python compute is the minority of wall-clock, so removing
+even the whole 18% is worth single-digit percent overall. The ceiling is the **serialized
+round-trip** — policy → pipe → Unity → pipe → policy — where the dominant terms are IPC latency and
+Unity's own step time, neither of which is Python being slow.
+
+So the original hoped-for 1.26–1.44× per-run speedup **is not available from optimising our Python**.
+If per-run wall-clock ever becomes the binding constraint, the levers are Unity's step time or the
+IPC structure (e.g. shared-memory observation transfer instead of pickling through pipes), both far
+larger pieces of work than this was scoped as.
+
+⚠️ The precise on-CPU/wall ratio is rough: `--idle` samples per *thread*, and an idle
+`multiprocessing.resource_tracker` process contributes 12.4% of wall samples while doing nothing.
+The qualitative split — blocked ≫ computing — is robust; treat the exact percentages as indicative.
+
+**Residual cheap win, if anyone is in that file anyway:** vectorize `update_from_lidar`. ~18% of
+Python CPU for a mechanical change. Not the ceiling, just free money.
+
+*Background, for context:* rollout is 62% of wall-clock (7-wide run: `fps=593`,
+`rollout_fps=962` → 1.04 ms/step rollout vs 0.65 ms/step optimize), so 2× rollout would have been
+1.44× overall — 8.3 h → 5.8 h on an 18M-step run. That is the number now shown to be unavailable
+from Python-side work.
 
 ---
 
@@ -87,3 +108,21 @@ extrapolated, not measured.
 
 Which caps `n_envs ≤ 10` for scheduler-driven runs. Fine at the pinned `n_envs=4`, but
 `defs/memory_houses_paperhparams.yaml` wants 256 envs and is therefore CLI-only.
+
+---
+
+## Small, mechanical
+
+### Vectorize `exploration_tracker.update_from_lidar`
+
+**~18% of all Python CPU time** during a volumetric-exploration run (job 11326598 — see the
+rollout-ceiling entry above). `_bresenham_ray` walks cells in a Python `for` loop, then ~8 small
+numpy ops run on a few-dozen-element array — per ray, per step, per env. Hundreds of tiny numpy
+calls per step, where per-call overhead dominates the arithmetic.
+
+The fix is mechanical: build one `(n_rays, max_cells, 2)` array and do the bounds-clip, free-cell
+fill and endpoint write as a handful of whole-array operations instead of a loop.
+
+**Do not expect it to move training throughput much** — Python compute is the minority of
+wall-clock, so this is worth single-digit percent overall. Worth doing if someone is in that file
+anyway; not worth a dedicated push.
