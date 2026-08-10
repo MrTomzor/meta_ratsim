@@ -932,7 +932,23 @@ as indicative rather than measured.
 > otherwise the next window is used. Nothing waits, no timeout is guessed. The launcher's 20 s wait
 > remains as a backstop for the residual test-then-bind race.
 >
-> **The fix is unverified on the cluster** — a B4 re-run is what would confirm it.
+> ✅ **Fix verified — B4 re-run, job 11325609, node `g01`, 11 m 14 s: 5/5 runs, 10/10 dispatches,
+> zero failures** (against 4 before). The mechanism fired three times and is visible in the log:
+>
+> ```
+> [scheduler] port windows still cooling, skipped: [9200] — using 9220
+> [scheduler] port windows still cooling, skipped: [9190, 9200] — using 9230
+> [scheduler] port windows still cooling, skipped: [9190, 9200] — using 9210
+> ```
+>
+> — at exactly the dispatches that died before. The round trip completes too: 9190 and 9200 were
+> later handed to `dreamer__seed1 stage 1` and `dreamer__seed2 stage 1` once genuinely clear, so
+> windows are recycled rather than leaked.
+
+**Packing cost, now on 6 clean samples** (the re-run's dreamer stages: 180, 203, 214, 216, 223,
+225 s; mean **210 s** against the 152 s solo baseline). Each concurrent run holds **72%** of solo,
+so two A100s give **1.45× aggregate** — matching the 1.44× first measured. Per-run slower, total
+throughput up.
 
 #### The throughput price of comparable curves
 
