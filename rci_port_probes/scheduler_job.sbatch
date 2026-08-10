@@ -11,16 +11,31 @@
 #
 # The flip side is that the whole experiment shares one wall-clock limit, so
 # pick the partition to fit the *experiment*, not one run:
-#   gpufast 4h (smoke tests only) | gpu 1d | gpulong 3d | gpuextralong 21d
+#   amdfast 4h (smoke tests only) | amd 1d | amdlong 3d | amdextralong 21d
 #
-# --cpus-per-task/--mem here MUST match `resources` in
-# scheduler/machines/rci.yaml (cpu_slot: 16, gpu: 1). See that file for why 16.
+# --cpus-per-task/--mem/--gres here MUST match `resources` in the machine
+# config you run against. The default below is the CPU shape:
+#   scheduler/machines/rci.yaml — cpu_slot: 112 = 7 concurrent PPO runs x 16
+#   threads. See that file for the measurements behind 16.
+#
+# The AMD nodes are the default because they are the *biggest* (126 allocatable
+# threads vs 46/70 on the Intel ones), not because they are faster — per-run
+# speed is within 5%. Intel-built venvs run there unmodified.
+#
+# ⚠️ `amd*` maps to a[01-16], which have NO GPUs — adding --gres here would be
+# rejected outright. For dreamer / recurrent_ppo, switch node type AND machine
+# config together:
+#
+#   sbatch -p amdgpu --gres=gpu:1 --cpus-per-task=31 --mem=100G \
+#          scheduler_job.sbatch <exp> --machine rci_gpu
+#
+# 31 rather than 112 because a GPU node rations threads per GPU (124/4 on
+# g[01-10]); taking more would strand A100s nobody else can schedule.
 #SBATCH --job-name=ratsim-sched
-#SBATCH --partition=gpufast
-#SBATCH --gres=gpu:1
+#SBATCH --partition=amdfast
 #SBATCH --time=03:30:00
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=112
+#SBATCH --mem=200G
 #SBATCH --output=/mnt/personal/%u/logs/sched-%j.out
 set -uo pipefail
 
@@ -32,15 +47,19 @@ fi
 . "${RCI_ENV:-$HOME/rci_env.sh}"      # modules, paths, per-job TMPDIR, *_PYTHON_PATH
 ratsim_activate
 
-export RATSIM_SCHEDULER_MACHINE=rci
+# Overridable so the GPU variant can be selected at submit time:
+#   RATSIM_SCHEDULER_MACHINE=rci_gpu sbatch -p amdgpu --gres=gpu:1 ... <exp>
+# (a `--machine` arg after <exp> also wins — scheduler_run.py prefers the flag.)
+export RATSIM_SCHEDULER_MACHINE="${RATSIM_SCHEDULER_MACHINE:-rci}"
 export RATSIM_XVFB=1
 # No RATSIM_RUNDIR / base_port: the launcher derives both from $SLURM_JOB_ID.
 
-# Per-RUN thread budget, not per-job. rci_env.sh defaults these to the whole
-# allocation, which is right for one training but catastrophic here: N children
-# would each take all 16 cores. Must match needs.cpu_slot in machines/rci.yaml.
-# `needs.cpu_slot` is only scheduler bookkeeping -- it does not constrain the
-# child's thread count, so this is the half that actually enforces it.
+# BLAS/OpenMP threads are per-PROCESS, so this is a per-run budget and must stay
+# small: with 7 children each would otherwise size its pool from the node's 128
+# CPUs. 4 is the measured optimum for PPO's optimize phase, not a fraction of
+# the allocation -- see the long comment in rci_env.sh, which sets the same
+# default. This is separate from needs.cpu_slot in the machine config: that is
+# only scheduler bookkeeping and does not constrain the child's thread count.
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export OPENBLAS_NUM_THREADS=4

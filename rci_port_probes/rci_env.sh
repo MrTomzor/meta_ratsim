@@ -89,6 +89,30 @@ if [ -n "${SLURM_CPUS_PER_TASK:-}" ]; then
   unset _rat_threads
 fi
 
+# --- process/thread limit ---------------------------------------------------
+# RLIMIT_NPROC counts THREADS, not processes, and is enforced per-user
+# per-node -- so it has to be raised in every job, not once somewhere.
+#
+# One headless Unity instance spawns exactly 266 tasks (measured, dead
+# consistent: 1 instance -> 270 tasks, 14 -> 3728, +266 each time). Unity sizes
+# its worker pool from /proc/cpuinfo, i.e. the whole 128-thread node, not the
+# cgroup -- the same "sees the machine, ignores the allocation" trap as
+# OMP_NUM_THREADS above.
+#
+# Against the default soft limit of 4096 that caps you at 14 concurrent Unity
+# instances per node. A 7-run job at n_envs=4 wants 28, and fails at the 15th
+# with `fork: Resource temporarily unavailable`. That EAGAIN surfaces as a
+# subprocess.TimeoutExpired in the launcher, which reads like a slow Unity boot
+# and is not one -- boots were ~1s throughout. If you see a launch storm fail,
+# check the launcher's own stderr for the fork error before believing the
+# Python traceback.
+#
+# The hard limit is 4127387, so raising the soft limit needs no privileges.
+# 32768 = 123 Unity instances, comfortably past anything one node can host.
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+  ulimit -u 32768 2>/dev/null || echo "rci_env: WARNING - could not raise ulimit -u (now $(ulimit -u)); >14 concurrent Unity instances will fail to fork" >&2
+fi
+
 # --- paths ------------------------------------------------------------------
 export RATSIM_GIT_DIR="${RATSIM_GIT_DIR:-/mnt/personal/$USER/git}"
 export RATSIM_VENV_DIR="${RATSIM_VENV_DIR:-/mnt/personal/$USER/ratvenv}"

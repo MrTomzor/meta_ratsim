@@ -10,15 +10,19 @@ a SLURM-scheduled HPC cluster at CTU. Written after reading the cluster's
 **Where things stand (2026-08-07):** Phases 0–2 complete. Install, headless Unity, single training,
 concurrent trainings and the scheduler all run on the cluster.
 
-**Both design decisions are now made** (2026-08-07) and neither is implemented yet — these are the
-next two pieces of work:
-1. **`n_envs` moves out of the machine config onto the method / experiment def**, same value on
-   every machine, machine configs keep capacity only (§0.8). **The value is `4`**, read off the
-   existing runs. **`machines/rci.yaml` must be re-sized in the same change** — at `n_envs=4` a run
-   needs ~16 cores, and leaving `needs.cpu_slot: 4` gives the worst configuration measured (§0.9).
+**Both design decisions were made on 2026-08-07.** The first is now implemented (2026-08-10); the
+second is the next piece of work:
+1. ✅ **`n_envs` moved out of the machine config onto the method / experiment def** — `MethodSpec.n_envs`,
+   default `4`, same value on every machine; machine configs keep capacity only (§0.8). A machine
+   config that still sets `n_envs:` is a hard error naming the fix. `machines/rci.yaml` was re-sized
+   in the same change to the verified AMD shape (`cpu_slot: 112`, `needs: 16` → 7 concurrent runs),
+   and `validate_against_machine` now warns below ~4 cpu_slots per env. `rci_env.sh` also raises
+   `ulimit -u` to 32768 for every job (§0.95).
 2. **Dreamer scales via N GPUs in one job, one scheduler** — needs a `GpuAllocator` mirroring
    `PortAllocator` to export `CUDA_VISIBLE_DEVICES` per child (before phase 3). A whole GPU node
-   (72 cores, 4× V100) is exactly 4 runs × 18 cores, which is also the fair-share ratio.
+   (72 threads, 4× V100) is exactly 4 runs × 18 threads, which is also the fair-share ratio.
+   Until it exists, `rci.yaml` declares `gpu: 1` precisely to stop several dreamers landing on
+   device 0 — do not raise it without the allocator.
 
 Account resource ceilings and node topology are in **§0.55** — planning limits only; **do not
 launch anything large without asking the user first.**
@@ -662,6 +666,15 @@ Same value on every machine. The split:
   warning when a run's granted `cpu_slot` is below its `n_envs`, since each Unity env is roughly a
   core. On `rci.yaml` (`cpu_slot: 4`) any `n_envs > 4` should warn.
 
+**Implemented 2026-08-10.** As built, the warning threshold is `4 × n_envs`, not `1 × n_envs` —
+§0.9 had already measured that one env needs ~4 *threads*, not one, so the looser rule written above
+would have passed the exact 4-thread configuration that ran at 17 fps. `cpu_slot` is now documented
+as counting threads in all three machine configs, which is what makes the check comparable across
+them. Touched: `experiment_defs.py` (`DEFAULT_N_ENVS`, `MethodSpec.n_envs`, snapshot),
+`scheduler/config.py` (profile field removed + migration error + warning),
+`scheduler/scheduler.py` (dispatch and `--use-port-9000` read the def), all three
+`machines/*.yaml`, `scheduler/README.md`.
+
 #### ✅ The value: **`n_envs = 4`**, read off the existing runs (2026-08-07)
 
 Not a guess — the scheduler passes `n_envs=<n>` on the dispatched command line
@@ -856,6 +869,10 @@ Boots were never slow — the fixed run logs `TCP server up on port 9440 after 1
 no privileges — `RLIMIT_NPROC` is a fork-bomb guard, not a policy quota, and SLURM cgroups still
 bound CPU and memory. ⚠️ **It is per-user per-node, not per-job**, so two of your jobs on one node
 share the budget and each must raise it. Belongs in `rci_env.sh`, not in individual scripts.
+
+**Done (2026-08-10)** — `rci_env.sh` raises it whenever `$SLURM_JOB_ID` is set, and warns rather
+than failing if the raise is ever refused. Guarded on `$SLURM_JOB_ID` so sourcing the file on the
+login node changes nothing there.
 
 > 🔎 **[VERIFY] 266 threads per instance is Unity sizing its job-worker pool from the node's 128
 > CPUs, not from our cgroup allocation — the exact shape of the `OMP_NUM_THREADS` trap (§0.6), one
