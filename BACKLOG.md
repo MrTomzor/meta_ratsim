@@ -74,6 +74,15 @@ periodic in-stage checkpointing (embodied writes `ckpt/latest` ~every 10 min), s
 watchdog resumes cheaply, but SB3 methods do not. Currently mitigated by choosing a long enough
 partition rather than fixed.
 
+### Multi-GPU verified at 2 cards, not 4
+
+B4 (jobs 11325473, 11325609) proved the `GpuAllocator` on **2** A100s. A whole `g[01-10]` node is 4
+cards and 124 threads (`gpu: 4`, `cpu_slot: 124`), which nothing has exercised. Two things could
+differ at 4: whether the 72%-of-solo packing cost holds or degrades as more Unity instances contend
+for the same cores, and whether `--mem` needs raising (dreamer's `max_ram_gb: 30` × 4 = 120 GB plus
+Unity). Not blocking — 2 GPUs works today — but the numbers in `rci_gpu.yaml` for a full node are
+extrapolated, not measured.
+
 ### `PortAllocator.window_size` is hard-capped at 10
 
 Which caps `n_envs ≤ 10` for scheduler-driven runs. Fine at the pinned `n_envs=4`, but
