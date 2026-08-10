@@ -24,10 +24,8 @@ second is the next piece of work:
    jobs with no `needs.gpu` are masked off the GPUs entirely so a CPU-profile PPO run can't take
    memory from the dreamer beside it; capacity is `min(resources.gpu, granted)` so a deliberate cap
    isn't widened by an over-asking `--gres`. On a machine declaring no GPUs nothing is touched, so
-   the laptop path is unchanged. Verified by simulation (4 distinct devices, exhaustion, release,
-   re-dispatch) — **not yet on real hardware: B4 (N dreamers in one `amdgpulong` job) is still
-   unrun.** Scale by moving `--gres=gpu:N`, `resources.gpu` and `cpu_slot` together; `cpu_slot`
-   binds independently.
+   the laptop path is unchanged. **Verified on real hardware — B4, job 11325473, §0.96.** Scale by
+   moving `--gres=gpu:N`, `resources.gpu` and `cpu_slot` together; `cpu_slot` binds independently.
 
 Backlog of examined-and-parked ideas lives in `BACKLOG.md` — notably `-job-worker-count`
 (**dropped**: the 7-wide job's own numbers refute the thread-contention hypothesis) and profiling
@@ -895,6 +893,46 @@ Also fixed while chasing this: the Unity boot wait was hardcoded to 30 s in **tw
 agree — the shell loop in `start_ratsim_headless.sh` and `_spawn_via_script`'s `timeout_s`. If the
 Python one is shorter it kills the script mid-wait and a timeout reads as a crash. Both now read
 **`RATSIM_BOOT_TIMEOUT`**, defaulting to 30 so laptop and single-run behaviour are unchanged.
+
+### 0.96 — B4: the GpuAllocator works, and it uncovered a port-recycling bug
+
+**Job 11325473**, node `g12`, `amdgpufast`, `--gres=gpu:2 --cpus-per-task=62 --mem=200G`, 8 m 55 s.
+3 dreamer seeds + 2 PPO seeds, 2 stages × 10k steps, BFS, `--machine rci_gpu2` (a local 2-GPU
+variant of `rci_gpu.yaml`). Deliberately 2 GPUs, not the whole 8-card node: placement is provable
+with two.
+
+**All three allocator behaviours confirmed**, and — the part that matters — confirmed from *outside*
+the scheduler. A background sampler ran `nvidia-smi --query-compute-apps` every 10 s, so this is not
+the scheduler agreeing with itself:
+
+| check | evidence |
+|---|---|
+| concurrent dreamers on distinct cards | seed0→gpu 0, seed1→gpu 1; **2 procs on 2 distinct GPUs** sustained ~2.5 min |
+| PPO masked off the GPUs | 4/4 dispatches `gpu=none(masked)`; **never appeared in `nvidia-smi`** despite running concurrently |
+| release → reallocate | seed2 took gpu 1 once seed1 finished |
+
+**Packing cost.** Two clean concurrent samples: 208 s and 210 s per 10k-step stage against the
+**152 s** solo A100 baseline (§0.56). So each run holds **73%** of solo and two together give
+**1.44×** aggregate — per-run slower, total throughput up, which is the whole point. The loss is
+CPU-side contention (Unity), not GPU: a PPO run was also competing for cores. Three samples; a
+third dreamer stage that ran mostly alone took 256 s, which does not fit the pattern, so treat these
+as indicative rather than measured.
+
+> ⚠️ **A separate, pre-existing bug killed 4 of 5 runs** — nothing to do with GPUs.
+> `RuntimeError: port 9640 still in use after waiting`. The scheduler reaps a job when its *train
+> process* exits, but that process spawned `n_envs` Unity children who outlive it, so a
+> just-released window is still held when the next dispatch gets it. **4 of 4 dreamer
+> re-dispatches failed, 0 of 4 PPO ones** — PPO's Unity children die inside the launcher's 20 s
+> grace (`_wait_port_bindable`), dreamer's don't.
+>
+> The tempting fix is a longer grace, but that guesses how long teardown takes on an arbitrarily
+> loaded node: too short still fails, too long blocks a run for nothing when a port is genuinely
+> stuck. **Fixed instead in `PortAllocator` (2026-08-10)**, the only place that knows other windows
+> exist: a released window goes to `cooling` and is only handed out once every port in it binds,
+> otherwise the next window is used. Nothing waits, no timeout is guessed. The launcher's 20 s wait
+> remains as a backstop for the residual test-then-bind race.
+>
+> **The fix is unverified on the cluster** — a B4 re-run is what would confirm it.
 
 #### The throughput price of comparable curves
 
