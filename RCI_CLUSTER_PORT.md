@@ -18,11 +18,20 @@ second is the next piece of work:
    in the same change to the verified AMD shape (`cpu_slot: 112`, `needs: 16` → 7 concurrent runs),
    and `validate_against_machine` now warns below ~4 cpu_slots per env. `rci_env.sh` also raises
    `ulimit -u` to 32768 for every job (§0.95).
-2. **Dreamer scales via N GPUs in one job, one scheduler** — needs a `GpuAllocator` mirroring
-   `PortAllocator` to export `CUDA_VISIBLE_DEVICES` per child (before phase 3). A whole GPU node
-   (72 threads, 4× V100) is exactly 4 runs × 18 threads, which is also the fair-share ratio.
-   Until it exists, `rci.yaml` declares `gpu: 1` precisely to stop several dreamers landing on
-   device 0 — do not raise it without the allocator.
+2. ✅ **Dreamer scales via N GPUs in one job, one scheduler** — `GpuAllocator` (`scheduler/gpus.py`,
+   2026-08-10) mirrors `PortAllocator` and sets `CUDA_VISIBLE_DEVICES` per child. Pool comes from
+   the job's own `CUDA_VISIBLE_DEVICES` (SLURM's cgroup already lists exactly the granted cards);
+   jobs with no `needs.gpu` are masked off the GPUs entirely so a CPU-profile PPO run can't take
+   memory from the dreamer beside it; capacity is `min(resources.gpu, granted)` so a deliberate cap
+   isn't widened by an over-asking `--gres`. On a machine declaring no GPUs nothing is touched, so
+   the laptop path is unchanged. Verified by simulation (4 distinct devices, exhaustion, release,
+   re-dispatch) — **not yet on real hardware: B4 (N dreamers in one `amdgpulong` job) is still
+   unrun.** Scale by moving `--gres=gpu:N`, `resources.gpu` and `cpu_slot` together; `cpu_slot`
+   binds independently.
+
+Backlog of examined-and-parked ideas lives in `BACKLOG.md` — notably `-job-worker-count`
+(**dropped**: the 7-wide job's own numbers refute the thread-contention hypothesis) and profiling
+the ~1000 `rollout_fps` ceiling (**deferred**: laptop-only, ~1.4× per-run at best).
 
 Account resource ceilings and node topology are in **§0.55** — planning limits only; **do not
 launch anything large without asking the user first.**

@@ -167,3 +167,7 @@ ssh -N -f -L 6006:localhost:6006 user@<server>
 
 See `roadmap.md` for current project goals, milestones, and TODOs.
 
+See `BACKLOG.md` for ideas that were examined and deliberately parked — each entry records what it
+would buy and *why it was dropped*, so a parked idea doesn't get re-derived (or re-attempted after
+a measurement already refuted it).
+
