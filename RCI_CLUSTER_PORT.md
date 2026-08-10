@@ -41,7 +41,10 @@ Intel-built venvs **already run there unmodified** (verified on an A100); and th
 is simulator-bound is **false** — it is training-bound, which is the actual argument for A100.
 
 **Untested gaps:** whether the ~4-cores-per-env threshold (§0.9) holds for dreamer as it does for
-PPO, `n_envs=4` beyond 16 cores, and any laptop dreamer baseline.
+PPO, `n_envs=4` beyond 16 cores, any laptop dreamer baseline, and — the one that matters for a long
+run — **dreamer's `max_ram_gb` kill-and-resume path on the cluster** (§0.1).
+
+👉 **§0.1 is the planning summary: throughput, the 200-CPU QOS ceiling, and what is ready to run.**
 
 **Epistemic status:** every claim about *our code* below was verified by reading the
 source (file:line given). **§1 was verified empirically on the laptop (2026-08-06), and
@@ -52,6 +55,71 @@ Measured cluster facts are in §0.5; they supersede the wiki wherever they disag
 wiki's example outputs are visibly stale (its `nvidia-smi` sample shows driver 418 / CUDA
 10.1, i.e. ~2019, while the sidebar advertises an "H200 nodes upgrade 2025"), so treat its
 specifics as illustrative. Remaining **[VERIFY]** items are called out in §9.
+
+---
+
+## 0.1 Operational summary — what we can run, and how fast (2026-08-10)
+
+**Start here for planning.** Everything below is measured; the sections it cites have the workings.
+
+### Throughput
+
+| setup | steps/s | per 1M steps |
+|---|---|---|
+| PPO — **laptop**, 1 run | 581 | 0.48 h |
+| PPO — cluster, 1 run (16 threads, AMD) | 723 | 0.38 h |
+| **PPO — cluster, 7 runs in one job** | 608 each, **4253 total** | 0.46 h each, 7 at once |
+| Dreamer — cluster, 1 run (1 A100) | 66 | 4.2 h |
+| Dreamer — cluster, 2 runs (2 A100) | 48 each, 95 total | 5.8 h each, 2 at once |
+
+**PPO gets 7.3× the laptop in calendar time** — seven 9M-step seeds in ~4 h against ~30 h
+sequentially. Per-run speed is only ~1.25× the laptop (§0.56); **the entire win is packing.**
+
+**Dreamer is ~9× slower per step than PPO** — a 9M-step dreamer run is ~38 h solo. Plan dreamer in
+steps, not by analogy with PPO. There is still **no laptop dreamer baseline**, so no laptop
+comparison can be quoted for it.
+
+### The binding limit is the QOS, not the hardware
+
+| partition family | wall limit | max CPUs | max GPUs |
+|---|---|---|---|
+| `amdfast` etc. | 4 h | 700 | 8 |
+| `amd`, `amdgpu` | 1 day | **200** | 8 |
+| `amdlong`, `amdgpulong` | 3 days | **200** | 6 |
+
+**200 threads total** across the 1-day and 3-day partitions (§0.55). One 112-thread PPO job (7 runs)
+plus one 62-thread GPU job fits; **two 112-thread jobs do not**. So real sweeps cap out around
+**12 concurrent PPO runs**, not 7 × however many jobs you submit. `amdfast`'s 700 CPUs only helps
+for work that finishes inside 4 h.
+
+### Readiness
+
+- **PPO — ready.** Verified end-to-end at 7-wide × 100k steps, no retries, no errors (§0.9).
+- **Dreamer — ready for short runs; one unproven path for long ones.** Multi-GPU placement is
+  verified (§0.96) but only at 10k steps per stage. Dreamer's known RAM leak means the scheduler's
+  `max_ram_gb` SIGTERM-and-resume path *will* fire on a 38 h run, and **that path has never been
+  exercised on the cluster.** Cheap way to prove it: set `max_ram_gb: 4` so the watchdog trips
+  within minutes and check the run resumes from its checkpoint — a ~20 min job instead of 38 h.
+
+Two traps worth remembering:
+
+- `rci_port_probes/scheduler_job.sbatch` defaults to **`amdfast`, 4 h** — a smoke-test partition.
+  Real runs need `-p amd` or `-p amdlong` explicitly or they are killed mid-stage.
+- Checkpoints land only at **stage boundaries**, so choose enough stages that losing one is cheap.
+
+### Parallelism, concretely
+
+The scheduler has always run runs concurrently — `ResourceManager` + `PortAllocator` +
+`subprocess.Popen`, one job pinned to one node. What changed in this port is that it now does so
+*correctly at scale*: four separate defects each broke it a different way, and all four are fixed
+and verified on hardware —
+
+| defect | fix | verified |
+|---|---|---|
+| `n_envs` differed per machine → incomparable curves | moved to the experiment def, pinned at 4 | §0.8 |
+| concurrent GPU runs all landed on device 0 | `GpuAllocator` sets `CUDA_VISIBLE_DEVICES` per child | §0.96, job 11325609 |
+| reused port windows while Unity still held them | `PortAllocator` cools windows until they bind | §0.96, job 11325609 |
+| `ulimit -u` 4096 capped the node at 14 Unity instances | raised to 32768 in `rci_env.sh` | §0.95, job 11318081 |
 
 ---
 
