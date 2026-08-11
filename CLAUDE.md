@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working across the ratsim project.
 
+## Read this first: a question gets an answer, not code
+
+When the user asks a **question**, answer it in prose and stop. Do not edit files, commit, push,
+or run a burst of commands. Reading local files to answer is free; changing them is not.
+
+**Act only on an imperative verb aimed at you** — "do it", "make", "build", "implement", "fix",
+"change", "run it", "go ahead". Without one, the deliverable is an answer.
+
+These are *not* approval, and each has been misread as approval before:
+
+- A question about whether a change would help — "wouldn't that let me run more jobs?",
+  "isn't that faster?". Asking whether something is worth doing is not asking for it.
+- Agreeing with your reasoning, or explaining why the idea has value.
+- An earlier "say the word and I'll do it" that went unanswered while they asked something else.
+- Frustration with a problem you proposed a fix for.
+
+If you think a change is warranted, describe it in a sentence or two and **ask, then wait** —
+even when it looks obvious, even when they sound enthusiastic. Same rule, separately and
+emphatically, for anything submitted to the RCI cluster: announce partition / CPUs / GPU / wall
+time / what it answers, then wait for approval (see "Submitting experiments" below).
+
 ## Project Overview
 This project (name WIP) is a playground / simulator for researching large-scale long-horizon behavior, inspired primarily by the foraging capabilities of many types of animals (from bats traveling tens of kilometers to fruit trees, to dogs being trained to search for people in search-and-rescue missions over hour long missions and often requiring manipulation of the environment). Its primary goal is to pose foraging tasks/scenarios that can be attacked from multiple angles - robotics (ROS2 connection) and reinforcement learning (Gym env) and to find middle-ground solutions. The simulator offers large-scale, procedurally generated and loaded environments of many different types, while supporting as modular extensions as possible (new sensing, actuation, env generation, prefabs or textures etc).
 
