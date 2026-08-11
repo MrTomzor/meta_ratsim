@@ -66,9 +66,13 @@ the *same* W&B runs. Curves extend; they don't fork.
 ## Job shapes
 
 Every run needs **16 threads** at the pinned `n_envs=4`. That's a cliff, not a
-slope — the same run measures 17 fps on 4 threads and 723 on 16. Dreamer and
-RecurrentPPO also need **1 GPU each**; PPO deliberately doesn't, so it stays off
-the cards and leaves them free.
+slope — the same run measures 17 fps on 4 threads and 723 on 16. **Only dreamer
+needs a GPU.** PPO and RecurrentPPO both stay off the cards and leave them free.
+
+RecurrentPPO moved to CPU on 2026-08-11 after measurement: an A100 is worth
+1.6% end-to-end, because a 5000-step LSTM unroll at batch 1–2 is latency-bound
+(64× the work for 1.32× the time on a direct batch sweep). Details in
+`scheduler/machines/rci.yaml`.
 
 | Machine config | Allocation | Runs at once |
 |---|---|---|
@@ -99,8 +103,8 @@ $ ./rci_port_probes/submit.sh method_compare --time 3d --dry-run
 method_compare: 7 runs (1 variations × [ppo×3, dreamer×3, recurrent_ppo×1] seeds),
                 10 stages × 1,000,000 steps
   wall clock 3-00:00:00 → long partitions   mode bfs
-  → amdlong      112t, 200G          ppo                    (3 runs, 3 concurrent)
-  → amdgpulong   62t, 2×GPU, 200G    dreamer,recurrent_ppo  (4 runs, 2 concurrent)
+  → amdlong      112t, 200G          ppo,recurrent_ppo  (4 runs, 4 concurrent)
+  → amdgpulong   62t, 2×GPU, 200G    dreamer            (3 runs, 2 concurrent)
 ```
 
 Both feed the same exp_id: **one W&B group, one `analyze_experiment.py`**. A
