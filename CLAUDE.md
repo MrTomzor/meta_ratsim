@@ -4,8 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working across 
 
 ## Read this first: a question gets an answer, not code
 
-When the user asks a **question**, answer it in prose and stop. Do not edit files, commit, push,
-or run a burst of commands. Reading local files to answer is free; changing them is not.
+When the user asks a **question**, answer it in prose and stop. Do not edit files, create files in
+the project, commit, push, or deploy.
+
+**Analysis is not the thing being banned.** Read whatever you need, grep, run tests or profilers,
+write throwaway scripts in the scratch directory, benchmark, dig as deep as the question deserves
+— a good answer often requires real work, and they would rather wait for a well-founded one. The
+line is between *finding out* and *changing things*: investigate freely, then come back with an
+answer instead of a commit. (Cluster jobs are the exception on the "investigate freely" side —
+they cost shared resources, so they still need announcing and approval first.)
 
 **Act only on an imperative verb aimed at you** — "do it", "make", "build", "implement", "fix",
 "change", "run it", "go ahead". Without one, the deliverable is an answer.
