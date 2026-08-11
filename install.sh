@@ -238,7 +238,8 @@ pip install \
   gymnasium \
   "stable_baselines3[extra]" \
   sb3-contrib \
-  tensorboard
+  tensorboard \
+  wandb
 pip install -e "$GIT_DIR/ratsim"
 pip install --no-deps -e "$GIT_DIR/ratsim_wildfire_gym_env"
 # ratsim_experiments is a scripts dir (train.py / test.py), not a package —

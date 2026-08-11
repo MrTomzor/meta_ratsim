@@ -118,6 +118,16 @@ export RATSIM_GIT_DIR="${RATSIM_GIT_DIR:-/mnt/personal/$USER/git}"
 export RATSIM_VENV_DIR="${RATSIM_VENV_DIR:-/mnt/personal/$USER/ratvenv}"
 export RATSIM_UNITY_BIN="${RATSIM_UNITY_BIN:-/mnt/personal/$USER/ForagerSimBuildV1/ForagerSimBuildV1.x86_64}"
 
+# --- experiment tracking ----------------------------------------------------
+# Weights & Biases is OFF unless switched on, so without this every cluster run
+# would quietly train with no tracking -- nothing errors, the runs just never
+# appear. On by default here; unset or pass wandb=0 to opt a run out.
+#
+# Only the switch belongs in this file. The API key does NOT: rci_env.sh is
+# tracked in git. Credentials live in ~/.netrc (mode 600), which the wandb
+# client picks up automatically from any job.
+export RATSIM_WANDB="${RATSIM_WANDB:-1}"
+
 # Per-job scratch for pidfiles and Unity logs. $TMPDIR is NOT set by SLURM here,
 # and bare /tmp is shared with other users' jobs on the same node.
 if [ -n "${SLURM_JOB_ID:-}" ]; then
