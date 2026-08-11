@@ -191,36 +191,52 @@ W&B gives you live curves either way — group `<exp_id>`, tagged `rci`.
 
 ## Editing a def to run longer
 
-Stage size is what resume depends on: `stage_<i>.done` records *that stage K
-finished*, never how big it was.
+Give **any two** of `steps_per_stage`, `total_steps`, `n_stages` — the third is
+derived. No mental arithmetic required; pick whichever two you actually have an
+opinion about.
 
-**Prefer** authoring the stage size directly:
+**Best: the budget and the granularity.**
 
 ```yaml
 steps_per_stage: 300_000
-n_stages: 40                # → 12M total
+total_steps: 12_000_000     # → 40 stages
 ```
 
-Extending is then `n_stages: 40 → 60`. One number moves, no finished stage
-changes meaning, the new stages append.
+Want to train longer? Raise `total_steps` to 18M. Stage size is unchanged, so
+the first 40 stages keep their meaning and 20 new ones append. Nothing already
+finished is invalidated.
 
-**The legacy form still works** and most defs (including `memory_orthomaze`) use
-it:
+The two must divide evenly. If they don't, the error names the two nearest
+usable totals — again, no arithmetic on your side:
+
+```
+total_steps=12,500,000 is not a multiple of steps_per_stage=300,000.
+Nearest usable totals: 12,300,000 (41 stages) or 12,600,000 (42 stages).
+```
+
+`steps_per_stage` + `n_stages` works the same way (extend by raising
+`n_stages`). Giving all three is allowed and cross-checked — a contradiction is
+an error, not a silent winner.
+
+**⚠️ The legacy pairing is `total_steps` + `n_stages`**, which most defs
+(including `memory_orthomaze`) still use:
 
 ```yaml
 total_steps: 12_000_000
-n_stages: 40                # → 300k per stage, derived
+n_stages: 40                # → 300k per stage, DERIVED
 ```
 
-⚠️ But editing *either* number here silently resizes **every** stage, including
-ones already marked done. Bump `total_steps` to 18M on a run that's finished 30
-of 40 stages and those 30 markers now claim to represent 450k steps of training
-that never happened — and resume will build on them without complaint. The only
-safe edit to a legacy def is to scale both numbers together so the ratio holds.
+Here the *stage size* is the derived quantity, and that's the one thing resume
+depends on — `stage_<i>.done` records that stage K finished, never how big it
+was. Bump `total_steps` to 18M on a run that's finished 30 of 40 stages and those
+30 markers now claim 450k steps of training that never happened; resume builds on
+them without complaint. The only safe edit to such a def is to scale both numbers
+together so the ratio holds.
 
-Converting a def is safe as long as the new `steps_per_stage` equals what the
-old form derived (for `memory_orthomaze`, 12M/40 = exactly 300k, so stages come
-out identical and existing markers stay valid).
+Converting is free whenever the derived size is already what you want. For
+`memory_orthomaze`, 12M/40 is exactly 300k, so replacing `n_stages: 40` with
+`steps_per_stage: 300_000` produces identical stages and existing markers stay
+valid.
 
 ---
 
