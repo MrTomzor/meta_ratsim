@@ -153,6 +153,35 @@ Version-matching here is fiddly and has bitten us repeatedly:
 - **JAX** `0.4.33` with `jax[cuda12]` bundles CUDA 12.3, so it needs driver ≥545. Works on 550 as-is.
 - Error decode: torch's "found version NNNNN" = major·1000 + minor·10 + patch, so `12040` = CUDA 12.4.
 
+### Submitting experiments — `rci_port_probes/submit.sh`
+
+Don't hand-write sbatch lines. Pick the experiment and the wall clock; partition,
+`--cpus-per-task`, `--gres`, `--mem` and any CPU/GPU split come from the def and
+`ratsim_experiments/scheduler/machines/*.yaml`:
+
+```bash
+./submit.sh gps_ablation_5house --time 1d
+./submit.sh method_compare --time 4h --mode bfs --dry-run
+```
+
+A def mixing PPO and dreamer becomes **two jobs**, one per hardware class, both
+feeding the same exp_id (one W&B group, one analysis). That split is necessary,
+not stylistic: one scheduler process holds one SLURM allocation, and `rci.yaml`
+has no dreamer profile because the `amd*` partitions have no accelerators. The
+mechanism is `scheduler_run.py --methods`, with a per-job `state.<methods>.json`
+so the two jobs don't reap each other's children.
+
+**Resume is the default** — re-submit the same line and finished stages are
+skipped, so a 4 h taster you later extend to 3 days costs nothing and the W&B
+curves continue rather than restarting. `--restart` is the destructive opposite.
+
+Two ceilings worth knowing (RCI_CLUSTER_PORT.md §0.55, §0.1): the CPU/GPU caps
+are **aggregate across all your running jobs**, not per-job — 200 CPUs on the
+1-day/3-day groups, so one 112-thread PPO job plus one 62-thread GPU job fits and
+two 112-thread jobs do not. And checkpoints land at stage boundaries, so prefer
+`steps_per_stage:` in defs over `total_steps:` (see `scheduler/README.md` — the
+legacy form silently resizes stages already marked done).
+
 ### Viewing TensorBoard over SSH
 
 `ratsim_experiments/tensorboard.sh` binds to `localhost:6006`. Forward via SSH rather than opening firewall ports:

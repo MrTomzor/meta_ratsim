@@ -101,8 +101,14 @@ B4 (jobs 11325473, 11325609) proved the `GpuAllocator` on **2** A100s. A whole `
 cards and 124 threads (`gpu: 4`, `cpu_slot: 124`), which nothing has exercised. Two things could
 differ at 4: whether the 72%-of-solo packing cost holds or degrades as more Unity instances contend
 for the same cores, and whether `--mem` needs raising (dreamer's `max_ram_gb: 30` × 4 = 120 GB plus
-Unity). Not blocking — 2 GPUs works today — but the numbers in `rci_gpu.yaml` for a full node are
-extrapolated, not measured.
+Unity). Not blocking — 2 GPUs works today — but the numbers for a full node are extrapolated, not
+measured.
+
+**Update (2026-08-11):** the verified 2-card shape is now committed as
+`scheduler/machines/rci_gpu2.yaml` and is `submit.sh`'s default GPU target. It had been missing
+because `scheduler/machines/.gitignore` denies `*` and allow-lists individual files, so the local
+`rci_gpu2.yaml` used in B4 was silently untracked — leaving the repo with only the 1-card config,
+which fits a single run (16 + 16 > 31). Add future shared cluster configs to that allow-list.
 
 ### `PortAllocator.window_size` is hard-capped at 10
 
