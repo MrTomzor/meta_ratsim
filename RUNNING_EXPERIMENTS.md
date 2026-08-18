@@ -111,7 +111,8 @@ Both feed the same exp_id: **one W&B group, one `analyze_experiment.py`**. A
 single-method def stays a single submission.
 
 Escape hatches: `--machine rci_gpu2` forces everything into one job (PPO gets
-masked off the cards); `--only ppo` submits just one method's share.
+masked off the cards); `--only ppo` submits just one method's share;
+`--variations consec4` runs just one cell of a ladder def (see below).
 
 ---
 
@@ -252,6 +253,7 @@ valid.
 | `--dry-run` | print the sbatch lines, submit nothing |
 | `--mode bfs\|dfs` | dispatch order. **Never inferred.** `dfs` finishes runs one at a time; `bfs` advances every run through early stages first — better when a short job will be cut off and you want all methods comparable. |
 | `--only ppo` | submit just one method's job |
+| `--variations consec4` | run only these of the def's `variations:` — one cell of a ladder. Same exp_id and W&B group, own state file, resume still applies, and the SLURM ask shrinks to what the filtered cells need. |
 | `--machine rci_gpu2` | force everything into one job |
 | `--step-multiplier 0.01` | 1% of every step count — smoke test |
 

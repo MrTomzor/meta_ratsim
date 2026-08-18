@@ -190,6 +190,7 @@ Don't hand-write sbatch lines. Pick the experiment and the wall clock; partition
 ```bash
 ./submit.sh gps_ablation_5house --time 1d
 ./submit.sh method_compare --time 4h --mode bfs --dry-run
+./submit.sh bigdreamer_ladder --time 3d --variations consec4   # one ladder cell
 ```
 
 A def mixing PPO and dreamer becomes **two jobs**, one per hardware class, both
@@ -198,6 +199,11 @@ not stylistic: one scheduler process holds one SLURM allocation, and `rci.yaml`
 has no dreamer profile because the `amd*` partitions have no accelerators. The
 mechanism is `scheduler_run.py --methods`, with a per-job `state.<methods>.json`
 so the two jobs don't reap each other's children.
+
+`--variations V1,V2` is the same idea one axis over: run only some of a def's
+`variations:`, e.g. to continue one cell of a ladder without paying for the
+rest. Same exp_id / W&B group, own state file (`state.v.consec4.json`), and the
+SLURM ask shrinks to what the filtered cells actually need.
 
 **Resume is the default** — re-submit the same line and finished stages are
 skipped, so a 4 h taster you later extend to 3 days costs nothing and the W&B

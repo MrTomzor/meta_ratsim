@@ -3,6 +3,7 @@
 #
 #   ./submit.sh gps_ablation_5house --time 1d
 #   ./submit.sh method_compare --time 4h --mode bfs
+#   ./submit.sh dreamer_ladder --time 3d --variations consec4   # one ladder cell
 #   ./submit.sh dreamer_ladder --time 3d --dry-run
 #
 # You pick the experiment and the wall clock. Partition, --cpus-per-task,
